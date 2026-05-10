@@ -1,5 +1,7 @@
 # hxp
 
+- Mostly for personal use
+
 Live-preview workflow for Markdown / LaTeX / Typst, glued together from
 [helix], [pandoc], [latexmk], [typst], and [zathura] or [sioyek]. Edit on
 the left, compiled PDF auto-reloads on the right, errors render into the
