@@ -1,0 +1,14 @@
+set selection-clipboard clipboard
+
+# SyncTeX: jump from PDF (Ctrl+click) into the source via helix.
+# `hxp-jump` reads the per-source state file hxp() writes in
+# $XDG_RUNTIME_DIR/hxp and, if hxp was launched inside tmux, drives the
+# existing helix pane via send-keys. Falls back to spawning a fresh `hx`
+# when there's no live pane to talk to.
+set synctex true
+set synctex-editor-command "hxp-jump %{input}:%{line}"
+
+# Reload PDF when it changes on disk. Combined with hxp's SIGHUP, updates
+# appear instantly after each successful compile.
+set incremental-search true
+set adjust-open "width"

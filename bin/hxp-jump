@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Synctex reverse-search shim. Wired into zathura's `synctex-editor-command`
+# and sioyek's `inverse_search_command` so Ctrl+click in the PDF jumps to
+# the source line. Helix has no editor-server protocol, but if hxp was
+# launched inside tmux we can drive the existing helix via send-keys —
+# avoiding the "fresh hx window per click" UX the bare configs produced.
+#
+# Usage: hxp-jump <file>:<line>[:<col>]
+#
+# Strategy:
+#   1. Locate the per-source state file written by hxp() (~/.cache/hxp/).
+#   2. If it records a tmux pane, send keys to that pane:
+#        Esc Esc                 -- force normal mode
+#        :open <file>:<line>     -- helix accepts this colon-form jump
+#   3. Otherwise (no tmux, or stale state), fall back to spawning a new
+#      hx instance — same behavior the previous bare config had.
+
+set -u
+
+target="${1:-}"
+[[ -z "$target" ]] && exit 1
+
+# Parse "file:line[:col]". File paths may contain spaces but never colons in
+# practice from synctex; if they ever did, the line would still be the second
+# component from the right.
+if [[ "$target" =~ ^(.+):([0-9]+):([0-9]+)$ ]]; then
+  file="${BASH_REMATCH[1]}"
+  line="${BASH_REMATCH[2]}"
+  col="${BASH_REMATCH[3]}"
+elif [[ "$target" =~ ^(.+):([0-9]+)$ ]]; then
+  file="${BASH_REMATCH[1]}"
+  line="${BASH_REMATCH[2]}"
+  col=""
+else
+  # Couldn't parse — open the whole thing in a fresh editor.
+  exec hx "$target"
+fi
+
+realfile="$(realpath -m -- "$file" 2>/dev/null || printf '%s' "$file")"
+
+state_dir="${XDG_RUNTIME_DIR:-/tmp}/hxp"
+state_key="$(printf '%s' "$realfile" | sha1sum | cut -d' ' -f1)"
+state_file="$state_dir/$state_key.state"
+
+tmux_socket=""
+tmux_pane=""
+if [[ -r "$state_file" ]]; then
+  # Plain key=value parse — we never `source` the state file, so a source
+  # path containing ; or backticks can't trigger code execution.
+  while IFS='=' read -r k v; do
+    case "$k" in
+      tmux)      tmux_socket="$v" ;;
+      tmux_pane) tmux_pane="$v" ;;
+    esac
+  done < "$state_file"
+fi
+
+target_str="$realfile:$line"
+[[ -n "$col" ]] && target_str="$target_str:$col"
+
+if [[ -n "$tmux_pane" ]] && command -v tmux >/dev/null 2>&1; then
+  # tmux send-keys -t <pane> works regardless of whether the caller is
+  # inside tmux, as long as the same tmux server is running. The pane id
+  # ($TMUX_PANE-style %N) survives across sessions.
+  if TMUX="$tmux_socket" tmux send-keys -t "$tmux_pane" Escape Escape 2>/dev/null \
+     && TMUX="$tmux_socket" tmux send-keys -t "$tmux_pane" ":open $target_str" Enter 2>/dev/null; then
+    TMUX="$tmux_socket" tmux select-pane -t "$tmux_pane" >/dev/null 2>&1 || true
+    exit 0
+  fi
+fi
+
+# Fallback: no live helix we can reach — open a fresh one. Detached so
+# zathura/sioyek don't block waiting for the editor to close.
+exec hx "$target_str"
