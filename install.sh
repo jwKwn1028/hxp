@@ -3,8 +3,39 @@
 # locations under $HOME. Re-runnable: existing files get backed up to
 # *.bak.<timestamp> on the first run, and existing symlinks pointing at
 # this repo are left alone.
+#
+# Run `./install.sh --deps` to print the dependency list without installing.
 
 set -euo pipefail
+
+# Canonical dependency list. The README points here so the two never drift.
+print_deps() {
+  cat <<'EOF'
+Dependencies (install via your package manager):
+
+  Required:
+    zsh                  shell
+    helix (hx)           editor
+    pandoc               markdown -> PDF pipeline
+    inotify-tools        inotifywait, for the fallback watch loop
+
+  Recommended:
+    watchexec            kernel-level debouncing, smarter watch loop
+    xelatex              Unicode-capable PDF engine (texlive-xetex)
+    latexmk              .tex compile driver
+    typst                .typ compiler
+    sioyek or zathura    PDF viewer with reverse-search support
+    wmctrl, xprop        X11 window tiling (no-op on Wayland)
+
+  CJK markdown PDFs (Korean/Japanese/Chinese):
+    fonts-noto-cjk       or set HXP_CJK_FONT to a preferred family
+EOF
+}
+
+if [[ "${1:-}" == "--deps" || "${1:-}" == "-d" ]]; then
+  print_deps
+  exit 0
+fi
 
 repo="$(cd -- "$(dirname -- "$0")" && pwd)"
 ts="$(date +%Y%m%d-%H%M%S)"
@@ -49,10 +80,6 @@ Done. Final step (one-time):
   Verify ~/.local/bin is on PATH; if not, add it before zathura/sioyek
   spawn so synctex reverse-search can find hxp-jump.
 
-Dependencies (install via your package manager):
-  required: zsh, helix (hx), pandoc, inotify-tools (inotifywait)
-  recommended: watchexec, xelatex (texlive-xetex), latexmk, typst,
-               wmctrl, xprop, sioyek or zathura
-  CJK font (for Korean/Japanese/Chinese in markdown PDFs):
-               fonts-noto-cjk  -- or set HXP_CJK_FONT to your preference
 EOF
+
+print_deps

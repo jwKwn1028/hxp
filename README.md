@@ -64,12 +64,16 @@ linking. Re-running the script is safe.
 
 ## Dependencies
 
-| Required | Recommended |
-|---|---|
-| zsh, helix, pandoc, inotify-tools | watchexec, xelatex, latexmk, typst, wmctrl, xprop, sioyek **or** zathura |
+The canonical list lives in `install.sh`. Print it without installing:
 
-For CJK markdown PDFs install `fonts-noto-cjk` (Debian/Ubuntu) or set
-`HXP_CJK_FONT="Your Font"` if you want a different family.
+```sh
+./install.sh --deps
+```
+
+In short: `zsh`, `helix`, `pandoc`, and `inotify-tools` are required;
+`watchexec`, `xelatex`, `latexmk`, `typst`, `wmctrl`, `xprop`, and
+`sioyek` or `zathura` are recommended. For CJK markdown PDFs install
+`fonts-noto-cjk` (Debian/Ubuntu) or set `HXP_CJK_FONT="Your Font"`.
 
 ## Display server
 

@@ -138,6 +138,23 @@ _hxp_bib_for() {
   print -r -- "${bibs[1]}"
 }
 
+# True if the markdown source's YAML frontmatter declares a `bibliography:`
+# key. When it does, citeproc will load that file on its own — we must not
+# also pass --bibliography=, or the bib loads twice and entries duplicate.
+_hxp_md_declares_bibliography() {
+  emulate -L zsh
+  local src="$1" awk_bin=awk
+  [[ -f "$src" ]] || return 1
+  _hxp_need_cmd gawk && awk_bin=gawk
+
+  "$awk_bin" '
+    NR == 1 && /^---[[:space:]]*$/ { fm = 1; next }
+    fm && /^(---|\.\.\.)[[:space:]]*$/ { exit }
+    fm && /^[[:space:]]*bibliography[[:space:]]*:/ { found = 1; exit }
+    END { exit !found }
+  ' "$src" 2>/dev/null
+}
+
 # No-op: both viewers handle reload natively.
 #   * zathura uses its own inotify watcher (`reload-file` / `file_changed`)
 #     and re-renders on disk change — SIGHUP is NOT a reload signal in
@@ -548,8 +565,14 @@ _hxp_compile_once() {
       local -a pdf_vars
       pdf_vars=( -V colorlinks=true -V linkcolor=blue -V urlcolor=blue )
 
+      # If the doc declares its own `bibliography:` in YAML, just enable
+      # citeproc and let it find the file — passing --bibliography= on top
+      # of a frontmatter declaration loads the bib twice. Auto-bib only
+      # kicks in when the doc didn't pick one itself.
       local -a cite_args
-      if [[ -n "$bib" ]]; then
+      if _hxp_md_declares_bibliography "$src"; then
+        cite_args=( --citeproc )
+      elif [[ -n "$bib" ]]; then
         cite_args=( --citeproc --bibliography="$bib" )
       fi
 
@@ -612,7 +635,10 @@ _hxp_compile_once() {
         if [[ -f "$build_dir/$root_stem.pdf" ]]; then
           mv -f -- "$build_dir/$root_stem.pdf" "$temp_pdf"
           if [[ -f "$build_dir/$root_stem.synctex.gz" ]]; then
-            cp -f -- "$build_dir/$root_stem.synctex.gz" "$dir/$root_stem.synctex.gz" 2>/dev/null
+            # Sidecar must live next to the PDF for the viewer to find it.
+            # When the user opens an included .tex, $dir is the source's
+            # directory but the PDF lives at the project root — use ${pdf:h}.
+            cp -f -- "$build_dir/$root_stem.synctex.gz" "${pdf:h}/$root_stem.synctex.gz" 2>/dev/null
           fi
           ok=0
         fi

@@ -222,6 +222,11 @@ wpdf() {
     [[ "$changed" != "$src" ]] && continue
     while IFS= read -r -t 0.2 _drain 2>/dev/null; do :; done
 
+    # If the source was removed (rm, or atomic-rename gone wrong), stop
+    # rather than burning compiles on a missing file. The user's next
+    # `hxp` invocation will re-scaffold or open the new path cleanly.
+    [[ -f "$src" ]] || { (( quiet == 0 )) && print -- "wpdf: source vanished, exiting"; break; }
+
     if _hxp_compile_once "$src" "$ext" "$dir" "$stem" "$pdf" "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$build_dir" >/dev/null; then
       (( quiet == 0 )) && print -- "wpdf: OK  $(date +%H:%M:%S)"
     else
