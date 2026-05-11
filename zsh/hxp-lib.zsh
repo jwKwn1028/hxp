@@ -574,7 +574,7 @@ _hxp_compile_once() {
 
       if (
         cd -- "$dir" &&
-        pandoc -f markdown "${pdf_engine[@]}" "${pdf_vars[@]}" "${cite_args[@]}" "$base" -o "$temp_pdf" \
+        pandoc -f markdown+tex_math_single_backslash "${pdf_engine[@]}" "${pdf_vars[@]}" "${cite_args[@]}" "$base" -o "$temp_pdf" \
           --pdf-engine-opt=-synctex=1 \
           --pdf-engine-opt=-interaction=nonstopmode \
           --pdf-engine-opt=-halt-on-error \
@@ -585,7 +585,7 @@ _hxp_compile_once() {
       else
         (
           cd -- "$dir" &&
-          pandoc -f markdown "${cite_args[@]}" -s -t latex "$base" -o "$debug_tex" >/dev/null 2>&1
+          pandoc -f markdown+tex_math_single_backslash "${cite_args[@]}" -s -t latex "$base" -o "$debug_tex" >/dev/null 2>&1
         )
       fi
       ;;
