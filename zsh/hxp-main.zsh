@@ -18,6 +18,10 @@
 #   HXP_NO_NATIVE_TYP=1  : disable `typst watch`, use generic compile loop
 #   HXP_NO_WATCHEXEC=1   : disable watchexec, fall back to inotifywait
 #   HXP_NO_TILE=1        : disable wmctrl tiling of editor/viewer windows
+#   HXP_WM               : force "tiling" or "floating"; otherwise auto-detected.
+#                          Under tiling WMs (i3, sway, bspwm, …) we skip the
+#                          wmctrl -e geometry calls and let the WM (e.g.
+#                          autotiling) place the viewer beside the editor.
 
 [[ -r "$HOME/.zsh/hxp-lib.zsh" ]] && source "$HOME/.zsh/hxp-lib.zsh"
 
@@ -43,6 +47,29 @@ _hxp_editor_window_id() {
   _hxp_active_window_id
 }
 
+_hxp_wm_kind() {
+  emulate -L zsh
+  if [[ "$HXP_WM" == "tiling" || "$HXP_WM" == "floating" ]]; then
+    print -r -- "$HXP_WM"
+    return 0
+  fi
+
+  local wm=""
+  if command -v wmctrl >/dev/null 2>&1; then
+    wm="$(wmctrl -m 2>/dev/null | awk -F': *' 'tolower($1)=="name"{print tolower($2); exit}')"
+  fi
+  if [[ -z "$wm" ]] && command -v xprop >/dev/null 2>&1; then
+    wm="$(xprop -root -notype _NET_WM_NAME 2>/dev/null | awk -F\" '{print tolower($2); exit}')"
+  fi
+
+  case "$wm" in
+    *i3*|*sway*|*bspwm*|*dwm*|*awesome*|*xmonad*|*qtile*|*herbstluft*|*river*|*hyprland*)
+      print -r -- tiling ;;
+    *)
+      print -r -- floating ;;
+  esac
+}
+
 _hxp_wmctrl_workarea() {
   emulate -L zsh
   command -v wmctrl >/dev/null 2>&1 || return 1
@@ -64,6 +91,9 @@ _hxp_wmctrl_workarea() {
 _hxp_wmctrl_tile() {
   emulate -L zsh
   [[ "$HXP_NO_TILE" == "1" ]] && return 0
+  # On tiling WMs, _NET_MOVERESIZE_WINDOW is ignored for managed containers —
+  # let the WM (e.g. autotiling on i3) place the window itself.
+  [[ "$(_hxp_wm_kind)" == "tiling" ]] && return 0
   command -v wmctrl >/dev/null 2>&1 || return 1
 
   local ref="$1" side="$2" mode="${3:-name}"
@@ -123,6 +153,9 @@ _hxp_find_viewer_window() {
 _hxp_tile_viewer_when_ready() {
   emulate -L zsh
   [[ "$HXP_NO_TILE" == "1" ]] && return 0
+  # Tiling WM: skip the polling loop — autotiling already placed the viewer
+  # as a sibling split of the focused editor terminal.
+  [[ "$(_hxp_wm_kind)" == "tiling" ]] && return 0
 
   local -a wa
   wa=( $(_hxp_wmctrl_workarea) )

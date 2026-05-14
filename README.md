@@ -77,10 +77,8 @@ In short: `zsh`, `helix`, `pandoc`, and `inotify-tools` are required;
 
 ## Display server
 
-The window-tiling features (`wmctrl`, `xprop`) require **X11** — any
-EWMH-compliant X11 window manager works (GNOME-on-X11, KDE Plasma X11,
-XFCE, i3, openbox, dwm, …). Wayland is not supported; external tools
-can't move windows there by design.
+The window-tiling features (`wmctrl`, `xprop`) require **X11**. Wayland
+is not supported; external tools can't move windows there by design.
 
 On Wayland (or a system without `wmctrl`/`xprop` installed) the tiling
 code silently no-ops via `command -v` guards — `hxp` itself still works:
@@ -94,6 +92,26 @@ Check which session you're in:
 echo "$XDG_SESSION_TYPE"   # x11 or wayland
 ```
 
+### Floating vs. tiling window managers
+
+`hxp` detects the WM kind at runtime via `wmctrl -m` (falls back to
+`_NET_WM_NAME` on the root window) and picks one of two strategies:
+
+- **Floating WMs** (XFCE/xfwm, GNOME-on-X11/mutter, KDE/kwin, openbox,
+  …): `hxp` uses `wmctrl -e` to place helix on the left half and the
+  viewer on the right half of the active monitor's work area.
+- **Tiling WMs** (i3, sway, bspwm, dwm, awesome, xmonad, qtile,
+  herbstluftwm, river, hyprland): the geometry calls are skipped —
+  `_NET_MOVERESIZE_WINDOW` is ignored for managed containers anyway, so
+  fighting the WM is pointless. The viewer launches while the helix
+  terminal is focused, and the WM's own tiling logic (e.g.
+  [autotiling][autotiling] on i3) places it as a sibling split.
+
+[autotiling]: https://github.com/nwg-piotr/autotiling
+
+Override the detection with `HXP_WM=tiling` or `HXP_WM=floating` if the
+heuristic guesses wrong on your setup.
+
 ## Knobs
 
 | Env var | Effect |
@@ -103,6 +121,7 @@ echo "$XDG_SESSION_TYPE"   # x11 or wayland
 | `HXP_NO_NATIVE_TYP=1` | Use the generic compile loop instead of `typst watch`. |
 | `HXP_NO_WATCHEXEC=1` | Fall back to `inotifywait` instead of `watchexec`. |
 | `HXP_NO_TILE=1` | Disable wmctrl tiling of editor / viewer windows. |
+| `HXP_WM` | Force `tiling` or `floating` instead of auto-detect (see Display server). |
 
 ## Layout
 
