@@ -130,19 +130,30 @@ _hxp_find_viewer_window() {
   local id
 
   if [[ -n "$pid" ]]; then
-    id="$(wmctrl -lp 2>/dev/null | awk -v pid="$pid" '
-      $3 == pid { id=$1 }
+    # Require the PDF basename in the title too — sioyek's shared instance
+    # may own several windows on different workspaces; last-wins on PID
+    # alone would return whichever was opened most recently.
+    id="$(wmctrl -lp 2>/dev/null | awk -v pid="$pid" -v base="$base" '
+      BEGIN { base=tolower(base) }
+      $3 == pid {
+        line=tolower($0)
+        if (base == "" || index(line, base) > 0) id=$1
+      }
       END { if (id != "") print id }
     ')"
     [[ -n "$id" ]] && { print -r -- "$id"; return 0; }
   fi
 
+  # Require the PDF basename in the title so concurrent hxp sessions don't
+  # collide — a bare class match would pick *any* sioyek window when several
+  # share one instance via --new-window.
   id="$(wmctrl -lx 2>/dev/null | awk -v viewer="$viewer" -v base="$base" '
     BEGIN { viewer=tolower(viewer); base=tolower(base) }
     {
       line=tolower($0)
       cls=tolower($3)
-      if (cls ~ viewer || (base != "" && index(line, base) > 0)) id=$1
+      if (base != "" && index(line, base) > 0) id=$1
+      else if (base == "" && cls ~ viewer) id=$1
     }
     END { if (id != "") print id }
   ')"
@@ -352,7 +363,7 @@ hxp() {
 
   local viewer; viewer="$(_hxp_viewer)"
   case "$viewer" in
-    sioyek) sioyek --reuse-window "$pdf" >/dev/null 2>&1 &! ;;
+    sioyek) sioyek --new-window "$pdf" >/dev/null 2>&1 &! ;;
     zathura|*) zathura "$pdf" >/dev/null 2>&1 &! ;;
   esac
   local zpid=$!
@@ -364,11 +375,24 @@ hxp() {
 
   cleanup() {
     [[ -n "$wpid" ]] && { pkill -TERM -P "$wpid" 2>/dev/null; kill -TERM "$wpid" 2>/dev/null; }
-    [[ -n "$zpid" ]] && kill -TERM "$zpid" 2>/dev/null
 
-    pgrep -af "(zathura|sioyek) .*${pdf}" 2>/dev/null | awk '{print $1}' | while read -r p; do
-      kill -TERM "$p" 2>/dev/null
-    done
+    # Close *our* viewer window via wmctrl first. Sioyek runs as a single
+    # shared instance with one window per --new-window invocation; killing
+    # the process would close concurrent hxp sessions' windows too.
+    local _closed=0 _wid=""
+    if command -v wmctrl >/dev/null 2>&1; then
+      _wid="$(_hxp_find_viewer_window "$viewer" "$zpid" "$pdf")"
+      if [[ -n "$_wid" ]] && wmctrl -ic "$_wid" 2>/dev/null; then
+        _closed=1
+      fi
+    fi
+
+    if (( ! _closed )); then
+      [[ -n "$zpid" ]] && kill -TERM "$zpid" 2>/dev/null
+      pgrep -af "(zathura|sioyek) .*${pdf}" 2>/dev/null | awk '{print $1}' | while read -r p; do
+        kill -TERM "$p" 2>/dev/null
+      done
+    fi
 
     # Sweep transient build artifacts. Keep the rendered PDF — that's the
     # output the user wanted. Drop everything else: error log/markdown, the
