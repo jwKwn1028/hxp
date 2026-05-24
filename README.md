@@ -26,9 +26,13 @@ leaving the editor.
   state (OK / first error + suspect line + helix-jump target). Run in a
   separate tmux pane next to `hxp` if you want errors in your eyeline
   instead of glancing at the PDF.
-- Synctex reverse-search: Ctrl+click in the PDF jumps to the source line
-  in your already-running helix instance (when you launched `hxp` inside
-  tmux). Falls back to spawning a fresh `hx` if no live pane is reachable.
+- Synctex inverse search: hover over text in the PDF and press **F5** to
+  jump to the source line in your already-running helix instance (when you
+  launched `hxp` inside tmux). Works for `.tex` and `.md` files —
+  markdown goes through a two-step pipeline (pandoc md→tex, latexmk
+  tex→pdf) so the synctex data persists and `hxp-jump` maps it back to
+  the original markdown line. Falls back to spawning a fresh `hx` if no
+  live pane is reachable.
 - CJK font auto-selection for Markdown PDFs (Korean / Japanese / Chinese
   glyphs render instead of disappearing). Override via `HXP_CJK_FONT`.
 - Multi-error reporting: typst halts at the first error by default, but
@@ -58,6 +62,7 @@ Then add this single line to `~/.zshrc`:
 | `bin/hxp-jump` | `~/.local/bin/hxp-jump` |
 | `config/zathura/zathurarc` | `~/.config/zathura/zathurarc` |
 | `config/sioyek/prefs_user.config` | `~/.config/sioyek/prefs_user.config` |
+| `config/sioyek/keys_user.config` | `~/.config/sioyek/keys_user.config` |
 
 Existing files (not symlinks) are backed up to `*.bak.<timestamp>` before
 linking. Re-running the script is safe.
@@ -134,10 +139,12 @@ hxp/
 │   └── hxp-lib.zsh    # _hxp_compile_once / error rendering / hxp_errs
 ├── bin/
 │   ├── hxp-compile    # watchexec-driven recompile wrapper
-│   └── hxp-jump       # synctex reverse-search shim
+│   └── hxp-jump       # synctex inverse-search shim
 └── config/
     ├── zathura/zathurarc
-    └── sioyek/prefs_user.config
+    └── sioyek/
+        ├── prefs_user.config
+        └── keys_user.config
 ```
 
 `hxp-main.zsh` sources `hxp-lib.zsh`. The compile helpers in `hxp-lib.zsh`
@@ -153,8 +160,8 @@ The session creates these next to your source file; all are swept on
 |---|---|
 | `<src-dir>/.<stem>.error.log` | Raw compiler stderr/stdout. |
 | `<src-dir>/.<stem>.error.md` | Markdown rendered into the error PDF. |
-| `<src-dir>/.<stem>.debug.tex` | Pandoc's md→latex output (md path, on failure). |
+| `<src-dir>/.<stem>.debug.tex` | Pandoc's md→latex output (md path, fallback on failure). |
 | `<src-dir>/.<stem>.tmp.pdf` | Stage path before atomic move to the real PDF. |
-| `<src-dir>/.hxp_build_<stem>/` | latexmk's build tree (tex only). |
-| `<pdf-dir>/<stem>.synctex.gz` | Synctex sidecar (tex only, while viewing). |
+| `<src-dir>/.hxp_build_<stem>/` | latexmk's build tree (tex; md with synctex intermediate). |
+| `<pdf-dir>/<stem>.synctex.gz` | Synctex sidecar (tex and md, while viewing). |
 | `${XDG_RUNTIME_DIR:-/tmp}/hxp/<sha1>.state` | hxp-jump's per-source state file. |

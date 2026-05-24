@@ -326,12 +326,16 @@ hxp() {
   local err_md="$dir/.${stem}.error.md"
   local debug_tex="$dir/.${stem}.debug.tex"
   local build_dir="$dir/.hxp_build_${stem}"
+  local synctex_tex="$build_dir/${stem}.hxp.tex"
   local synctex_gz="$pdf_dir/$pdf_stem.synctex.gz"
 
-  # State file for hxp-jump: lets PDF reverse-search (Ctrl+click in
-  # zathura/sioyek) drive the existing helix instance instead of spawning
-  # a fresh `hx` window. Indexed by sha1(realpath of source) so concurrent
-  # hxp sessions don't collide.
+  # Resolve the editor terminal's X11 window ID before anything else moves
+  # focus. $WINDOWID is set by some terminals; _hxp_active_window_id falls
+  # back to xprop _NET_ACTIVE_WINDOW for terminals that don't.
+  local editor_wid; editor_wid="$(_hxp_editor_window_id)"
+
+  # State file for hxp-jump: lets PDF inverse-search drive the existing
+  # helix instance instead of spawning a fresh `hx` window.
   local state_dir="${XDG_RUNTIME_DIR:-/tmp}/hxp"
   mkdir -p -- "$state_dir" 2>/dev/null
   local state_key state_file
@@ -345,6 +349,7 @@ hxp() {
     print -r -- "pdf=$pdf"
     print -r -- "tmux=$TMUX"
     print -r -- "tmux_pane=$TMUX_PANE"
+    print -r -- "windowid=$editor_wid"
     print -r -- "pid=$$"
   } >| "$state_file" 2>/dev/null
 
@@ -354,7 +359,6 @@ hxp() {
     initial_ok=1
   fi
 
-  local editor_wid; editor_wid="$(_hxp_editor_window_id)"
   if [[ -n "$editor_wid" ]]; then
     _hxp_wmctrl_tile "$editor_wid" left id
   else
@@ -363,7 +367,12 @@ hxp() {
 
   local viewer; viewer="$(_hxp_viewer)"
   case "$viewer" in
-    sioyek) sioyek --new-window "$pdf" >/dev/null 2>&1 &! ;;
+    sioyek)
+      sioyek --new-window "$pdf" >/dev/null 2>&1 &!
+      # Auto-enable synctex mode so right-click triggers inverse search
+      # without needing to press F4 first.
+      { sleep 0.5 && sioyek --execute-command toggle_synctex --nofocus; } >/dev/null 2>&1 &!
+      ;;
     zathura|*) zathura "$pdf" >/dev/null 2>&1 &! ;;
   esac
   local zpid=$!
@@ -399,7 +408,7 @@ hxp() {
     # .debug.tex pandoc emits for md→tex line-mapping, the latex build dir,
     # the synctex sidecar (only useful while the viewer is open), and the
     # state file used by hxp-jump.
-    rm -f -- "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" 2>/dev/null
+    rm -f -- "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_tex" "$synctex_gz" 2>/dev/null
     rm -rf -- "$build_dir" 2>/dev/null
     [[ -n "$state_file" ]] && rm -f -- "$state_file" 2>/dev/null
   }
@@ -412,8 +421,11 @@ hxp() {
   fi
 
   if (( initial_ok == 0 )); then
-    if [[ "$ext" == "md" && -f "$debug_tex" ]]; then
-      hx "$src" "$err_log" "$debug_tex"
+    local _dtex=""
+    [[ -f "$synctex_tex" ]] && _dtex="$synctex_tex"
+    [[ -z "$_dtex" && -f "$debug_tex" ]] && _dtex="$debug_tex"
+    if [[ "$ext" == "md" && -n "$_dtex" ]]; then
+      hx "$src" "$err_log" "$_dtex"
     else
       hx "$(_hxp_hx_target_for_error "$src" "$err_log")" "$err_log"
     fi

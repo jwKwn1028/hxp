@@ -68,6 +68,7 @@ link "$repo/bin/hxp-compile"              "$HOME/.local/bin/hxp-compile"
 link "$repo/bin/hxp-jump"                 "$HOME/.local/bin/hxp-jump"
 link "$repo/config/zathura/zathurarc"     "$HOME/.config/zathura/zathurarc"
 link "$repo/config/sioyek/prefs_user.config" "$HOME/.config/sioyek/prefs_user.config"
+link "$repo/config/sioyek/keys_user.config" "$HOME/.config/sioyek/keys_user.config"
 
 cat <<'EOF'
 

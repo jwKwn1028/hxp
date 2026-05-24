@@ -565,10 +565,6 @@ _hxp_compile_once() {
       local -a pdf_vars
       pdf_vars=( -V colorlinks=true -V linkcolor=blue -V urlcolor=blue )
 
-      # If the doc declares its own `bibliography:` in YAML, just enable
-      # citeproc and let it find the file — passing --bibliography= on top
-      # of a frontmatter declaration loads the bib twice. Auto-bib only
-      # kicks in when the doc didn't pick one itself.
       local -a cite_args
       if _hxp_md_declares_bibliography "$src"; then
         cite_args=( --citeproc )
@@ -576,40 +572,81 @@ _hxp_compile_once() {
         cite_args=( --citeproc --bibliography="$bib" )
       fi
 
-      # pandoc's default PDF engine is pdflatex, which chokes on any non-ASCII
-      # input (Unicode → "character not set up for use with LaTeX"). Prefer
-      # xelatex/lualatex when present so Korean, emoji, etc. compile cleanly.
-      local -a pdf_engine
-      if _hxp_need_cmd xelatex; then
-        pdf_engine=( --pdf-engine=xelatex )
-      elif _hxp_need_cmd lualatex; then
-        pdf_engine=( --pdf-engine=lualatex )
-      fi
-
-      # When using a Unicode-aware engine, set CJKmainfont so Korean/Japanese/
-      # Chinese glyphs actually render. Skip if the doc already declares one
-      # in its YAML — user intent wins over our default.
-      if (( ${#pdf_engine[@]} > 0 )) \
-         && ! grep -q -E '^[[:space:]]*CJKmainfont[[:space:]]*:' -- "$src" 2>/dev/null; then
+      if ! grep -q -E '^[[:space:]]*CJKmainfont[[:space:]]*:' -- "$src" 2>/dev/null; then
         local cjk_font; cjk_font="$(_hxp_cjk_font)"
         [[ -n "$cjk_font" ]] && pdf_vars+=( -V "CJKmainfont=$cjk_font" )
       fi
 
-      if (
-        cd -- "$dir" &&
-        pandoc -f markdown+tex_math_single_backslash "${pdf_engine[@]}" "${pdf_vars[@]}" "${cite_args[@]}" "$base" -o "$temp_pdf" \
-          --pdf-engine-opt=-synctex=1 \
-          --pdf-engine-opt=-interaction=nonstopmode \
-          --pdf-engine-opt=-halt-on-error \
-          --pdf-engine-opt=-file-line-error \
-          >"$err_log" 2>&1
-      ); then
-        ok=0
-      else
-        (
+      if _hxp_need_cmd latexmk; then
+        # Two-step pipeline: pandoc md→tex, then latexmk tex→pdf.
+        # The intermediate lives inside the build dir so the filename
+        # doesn't start with a dot (xelatex's openout_any=p forbids
+        # dotfiles). hxp-jump detects the .hxp.tex suffix and maps
+        # back to the original .md via the .hxp_build_ parent dir.
+        mkdir -p -- "$build_dir"
+        local synctex_tex="$build_dir/${stem}.hxp.tex"
+        if (
           cd -- "$dir" &&
-          pandoc -f markdown+tex_math_single_backslash "${cite_args[@]}" -s -t latex "$base" -o "$debug_tex" >/dev/null 2>&1
-        )
+          pandoc -f markdown+tex_math_single_backslash "${pdf_vars[@]}" "${cite_args[@]}" \
+            -s -t latex "$base" -o "$synctex_tex" \
+            >"$err_log" 2>&1
+        ); then
+          debug_tex="$synctex_tex"
+          local -a latexmk_engine
+          if _hxp_need_cmd xelatex; then
+            latexmk_engine=( -xelatex )
+          elif _hxp_need_cmd lualatex; then
+            latexmk_engine=( -lualatex )
+          else
+            latexmk_engine=( -pdf )
+          fi
+
+          if (
+            cd -- "$dir" &&
+            latexmk "${latexmk_engine[@]}" -synctex=1 \
+                -interaction=nonstopmode -halt-on-error -file-line-error \
+                -outdir="$build_dir" -auxdir="$build_dir" \
+                "$synctex_tex" >>"$err_log" 2>&1
+          ); then
+            local build_stem="${${synctex_tex:t}:r}"
+            if [[ -f "$build_dir/$build_stem.pdf" ]]; then
+              mv -f -- "$build_dir/$build_stem.pdf" "$temp_pdf"
+              if [[ -f "$build_dir/$build_stem.synctex.gz" ]]; then
+                local pdf_base="${${pdf:t}:r}"
+                cp -f -- "$build_dir/$build_stem.synctex.gz" \
+                  "${pdf:h}/$pdf_base.synctex.gz" 2>/dev/null
+              fi
+              ok=0
+            fi
+          fi
+        else
+          debug_tex="$synctex_tex"
+        fi
+      else
+        # Fallback: pandoc direct (no working synctex for inverse search).
+        local -a pdf_engine
+        if _hxp_need_cmd xelatex; then
+          pdf_engine=( --pdf-engine=xelatex )
+        elif _hxp_need_cmd lualatex; then
+          pdf_engine=( --pdf-engine=lualatex )
+        fi
+
+        if (
+          cd -- "$dir" &&
+          pandoc -f markdown+tex_math_single_backslash "${pdf_engine[@]}" "${pdf_vars[@]}" "${cite_args[@]}" "$base" -o "$temp_pdf" \
+            --pdf-engine-opt=-synctex=1 \
+            --pdf-engine-opt=-interaction=nonstopmode \
+            --pdf-engine-opt=-halt-on-error \
+            --pdf-engine-opt=-file-line-error \
+            >"$err_log" 2>&1
+        ); then
+          ok=0
+        else
+          (
+            cd -- "$dir" &&
+            pandoc -f markdown+tex_math_single_backslash "${cite_args[@]}" -s -t latex "$base" -o "$debug_tex" >/dev/null 2>&1
+          )
+        fi
       fi
       ;;
 
@@ -653,7 +690,9 @@ _hxp_compile_once() {
 
   if [[ $ok -eq 0 && -s "$temp_pdf" ]]; then
     mv -f -- "$temp_pdf" "$pdf"
-    rm -f -- "$err_md" "$debug_tex"
+    rm -f -- "$err_md"
+    # Keep the intermediate tex for md — synctex inverse search needs it.
+    [[ "$ext" != "md" ]] && rm -f -- "$debug_tex"
     _hxp_reload_viewer
     return 0
   fi

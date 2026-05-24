@@ -1,21 +1,45 @@
 #!/usr/bin/env bash
-# Synctex reverse-search shim. Wired into zathura's `synctex-editor-command`
-# and sioyek's `inverse_search_command` so Ctrl+click in the PDF jumps to
-# the source line. Helix has no editor-server protocol, but if hxp was
-# launched inside tmux we can drive the existing helix via send-keys —
-# avoiding the "fresh hx window per click" UX the bare configs produced.
+# Synctex inverse-search shim. Wired into zathura's `synctex-editor-command`
+# and sioyek's `inverse_search_command` so clicking in the PDF jumps to
+# the source line. Helix has no editor-server protocol, so we drive the
+# existing helix instance via tmux send-keys (preferred) or xdotool
+# keystrokes to the terminal window (X11 fallback).
 #
 # Usage: hxp-jump <file>:<line>[:<col>]
 #
 # Strategy:
-#   1. Locate the per-source state file written by hxp() (~/.cache/hxp/).
-#   2. If it records a tmux pane, send keys to that pane:
-#        Esc Esc                 -- force normal mode
-#        :open <file>:<line>     -- helix accepts this colon-form jump
-#   3. Otherwise (no tmux, or stale state), fall back to spawning a new
-#      hx instance — same behavior the previous bare config had.
+#   1. If the synctex path is a .hxp.tex intermediate (pandoc-generated),
+#      map back to the original .md source and approximate the line.
+#   2. Locate the per-source state file written by hxp().
+#   3. If it records a tmux pane, send keys to that pane.
+#   4. Else if it records a window ID and xdotool is available, type
+#      the :open command into the helix terminal window (X11).
+#   5. Otherwise fall back to spawning a new hx instance.
 
 set -u
+
+# Map a tex line number to the corresponding markdown line using a longest-
+# unique-word heuristic. Mirrors _hxp_guess_md_line_from_tex in hxp-lib.zsh.
+guess_md_line() {
+  local md="$1" tex="$2" tex_line="$3"
+  [[ -z "$tex_line" || ! -f "$tex" || ! -f "$md" ]] && return 0
+
+  local start end chunk sig
+  start=$(( tex_line - 3 )); (( start < 1 )) && start=1
+  end=$(( tex_line + 3 ))
+
+  chunk="$(sed -n "${start},${end}p" "$tex" 2>/dev/null \
+    | sed -E 's/\\[A-Za-z@]+(\*|)(\[[^]]*\])?(\{[^}]*\})?//g; s/[{}\\]/ /g; s/[[:space:]]+/ /g')"
+
+  sig="$(printf '%s' "$chunk" \
+    | tr ' ' '\n' \
+    | sed -E 's/[^[:alnum:]\-_.]//g' \
+    | awk 'length($0)>=8 { if (length($0)>max) { max=length($0); best=$0 } } END{ print best }')"
+
+  [[ -z "$sig" ]] && return 0
+
+  grep -nF -- "$sig" "$md" 2>/dev/null | head -n 1 | cut -d: -f1
+}
 
 target="${1:-}"
 [[ -z "$target" ]] && exit 1
@@ -36,32 +60,79 @@ else
   exec hx "$target"
 fi
 
+# Detect pandoc intermediate (.hxp.tex) and map back to the .md source.
+# The two-step md pipeline (pandoc md→tex, latexmk tex→pdf) produces synctex
+# that references .hxp.tex inside .hxp_build_<stem>/; we resolve that to the
+# original markdown in the parent directory.
+if [[ "$file" == *.hxp.tex ]]; then
+  dir_part="${file%/*}"
+  base_part="${file##*/}"
+  stem="${base_part%.hxp.tex}"
+
+  # The .hxp.tex lives in .hxp_build_<stem>/ — the .md is one level up.
+  parent="${dir_part##*/}"
+  if [[ "$parent" == .hxp_build_* ]]; then
+    dir_part="${dir_part%/*}"
+  fi
+
+  md_candidate="$dir_part/$stem.md"
+
+  if [[ -f "$md_candidate" ]]; then
+    md_line="$(guess_md_line "$md_candidate" "$file" "$line")"
+    file="$md_candidate"
+    [[ -n "$md_line" ]] && line="$md_line"
+    col=""
+  fi
+fi
+
 realfile="$(realpath -m -- "$file" 2>/dev/null || printf '%s' "$file")"
 
 state_dir="${XDG_RUNTIME_DIR:-/tmp}/hxp"
 state_key="$(printf '%s' "$realfile" | sha1sum | cut -d' ' -f1)"
 state_file="$state_dir/$state_key.state"
 
-tmux_socket=""
-tmux_pane=""
-if [[ -r "$state_file" ]]; then
-  # Plain key=value parse — we never `source` the state file, so a source
-  # path containing ; or backticks can't trigger code execution.
+read_state() {
+  tmux_socket=""
+  tmux_pane=""
+  window_id=""
+  [[ -r "$1" ]] || return 1
   while IFS='=' read -r k v; do
     case "$k" in
       tmux)      tmux_socket="$v" ;;
       tmux_pane) tmux_pane="$v" ;;
+      windowid)  window_id="$v" ;;
     esac
-  done < "$state_file"
+  done < "$1"
+}
+
+read_state "$state_file"
+
+# Fallback: if no exact match, scan state files for one whose source is in
+# the same directory tree — covers multi-file tex projects where synctex
+# reports an \input'd file that differs from the file passed to hxp.
+if [[ -z "$tmux_pane" && -z "$window_id" ]]; then
+  reported_dir="$(dirname "$realfile")"
+  for sf in "$state_dir"/*.state; do
+    [[ -r "$sf" && "$sf" != "$state_file" ]] || continue
+    sf_src=""
+    while IFS='=' read -r k v; do
+      [[ "$k" == "src" ]] && { sf_src="$v"; break; }
+    done < "$sf"
+    [[ -z "$sf_src" ]] && continue
+    sf_dir="$(dirname "$(realpath -m -- "$sf_src" 2>/dev/null || printf '%s' "$sf_src")")"
+    case "$reported_dir" in
+      "$sf_dir"|"$sf_dir"/*)
+        read_state "$sf"
+        break ;;
+    esac
+  done
 fi
 
 target_str="$realfile:$line"
 [[ -n "$col" ]] && target_str="$target_str:$col"
 
+# Method 1: tmux send-keys (works across terminals, cross-session).
 if [[ -n "$tmux_pane" ]] && command -v tmux >/dev/null 2>&1; then
-  # tmux send-keys -t <pane> works regardless of whether the caller is
-  # inside tmux, as long as the same tmux server is running. The pane id
-  # ($TMUX_PANE-style %N) survives across sessions.
   if TMUX="$tmux_socket" tmux send-keys -t "$tmux_pane" Escape Escape 2>/dev/null \
      && TMUX="$tmux_socket" tmux send-keys -t "$tmux_pane" ":open $target_str" Enter 2>/dev/null; then
     TMUX="$tmux_socket" tmux select-pane -t "$tmux_pane" >/dev/null 2>&1 || true
@@ -69,6 +140,26 @@ if [[ -n "$tmux_pane" ]] && command -v tmux >/dev/null 2>&1; then
   fi
 fi
 
-# Fallback: no live helix we can reach — open a fresh one. Detached so
-# zathura/sioyek don't block waiting for the editor to close.
+# Method 2: xdotool keystrokes to the terminal window (X11, no tmux needed).
+# Convert hex window IDs (0x...) from xprop to decimal for xdotool.
+if [[ "$window_id" == 0x* ]]; then
+  window_id=$(printf '%d' "$window_id" 2>/dev/null) || window_id=""
+fi
+if [[ -n "$window_id" ]] && command -v xdotool >/dev/null 2>&1; then
+  # Focus the helix terminal window.
+  xdotool windowactivate --sync "$window_id" 2>/dev/null || true
+  # Small delay for the window manager to complete the focus switch.
+  sleep 0.05
+  # Escape twice to ensure normal mode, then type the :open command.
+  xdotool key --window "$window_id" Escape Escape 2>/dev/null
+  sleep 0.02
+  # xdotool type --clearmodifiers releases any modifier keys (Ctrl, Shift)
+  # the user might be holding from the right-click gesture, preventing
+  # mis-fires like Ctrl+: instead of :.
+  xdotool type --window "$window_id" --clearmodifiers --delay 0 ":open $target_str" 2>/dev/null \
+    && xdotool key --window "$window_id" Return 2>/dev/null \
+    && exit 0
+fi
+
+# Fallback: no live helix we can reach — open a fresh one.
 exec hx "$target_str"
