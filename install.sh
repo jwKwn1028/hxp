@@ -27,8 +27,15 @@ Dependencies (install via your package manager):
     sioyek or zathura    PDF viewer with reverse-search support
     wmctrl, xprop        X11 window tiling (no-op on Wayland)
 
+  Inverse search (PDF -> editor), optional:
+    tmux                 in-place jumps into a running helix pane
+    xdotool              X11 keystroke fallback when not in tmux
+
   CJK markdown PDFs (Korean/Japanese/Chinese):
     fonts-noto-cjk       or set HXP_CJK_FONT to a preferred family
+
+  Note: any awk works (gawk/mawk/busybox) — no gawk-only features are used.
+  Run `hxp --doctor` after install to see which features are active.
 EOF
 }
 
@@ -66,6 +73,8 @@ link "$repo/zsh/hxp-main.zsh"             "$HOME/.zsh/hxp-main.zsh"
 link "$repo/zsh/hxp-lib.zsh"              "$HOME/.zsh/hxp-lib.zsh"
 link "$repo/bin/hxp-compile"              "$HOME/.local/bin/hxp-compile"
 link "$repo/bin/hxp-jump"                 "$HOME/.local/bin/hxp-jump"
+link "$repo/bin/hxp-mdline"               "$HOME/.local/bin/hxp-mdline"
+link "$repo/bin/hxp-dual-panelify"        "$HOME/.local/bin/hxp-dual-panelify"
 link "$repo/config/zathura/zathurarc"     "$HOME/.config/zathura/zathurarc"
 link "$repo/config/sioyek/prefs_user.config" "$HOME/.config/sioyek/prefs_user.config"
 link "$repo/config/sioyek/keys_user.config" "$HOME/.config/sioyek/keys_user.config"

@@ -189,14 +189,18 @@ wpdf() {
   emulate -L zsh
   setopt pipefail
 
-  local quiet=0
-  if [[ "$1" == "-q" || "$1" == "--quiet" ]]; then
-    quiet=1
-    shift
-  fi
+  local quiet=0 no_initial=0
+  while [[ "$1" == -* ]]; do
+    case "$1" in
+      -q|--quiet)   quiet=1; shift ;;
+      --no-initial) no_initial=1; shift ;;   # caller (hxp) already did it
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
 
   local src="$1"
-  [[ -z "$src" ]] && { print -u2 -- "usage: wpdf [-q] <file.{md,tex,typ}>"; return 2; }
+  [[ -z "$src" ]] && { print -u2 -- "usage: wpdf [-q] [--no-initial] <file.{md,tex,typ}>"; return 2; }
   [[ ! -f "$src" ]] && { print -u2 -- "wpdf: not found: $src"; return 2; }
 
   _hxp_need_cmd inotifywait || { print -u2 -- "wpdf: missing inotifywait (install inotify-tools)"; return 2; }
@@ -214,6 +218,7 @@ wpdf() {
   local err_md="$dir/.${stem}.error.md"
   local debug_tex="$dir/.${stem}.debug.tex"
   local build_dir="$dir/.hxp_build_${stem}"
+  local synctex_gz="$dir/$stem.synctex.gz"
 
   case "$ext" in
     md) ;;
@@ -222,10 +227,17 @@ wpdf() {
     *)   print -u2 -- "wpdf: unsupported extension: $ext"; return 2 ;;
   esac
 
-  trap 'rm -f -- "$temp_pdf"; exit 0' INT TERM HUP
+  # Sweep our transient build artifacts on exit. hxp() does its own sweep when
+  # it drives wpdf, but a standalone `wpdf foo.tex` would otherwise leave the
+  # build dir, logs, and synctex sidecar behind. `return` (not `exit`) so a
+  # foreground Ctrl-C doesn't take the interactive shell down with it.
+  trap '_hxp_sweep_artifacts "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" "$build_dir"; return 0' INT TERM HUP
 
-  # Initial compile so the viewer has something to show immediately.
-  _hxp_compile_once "$src" "$ext" "$dir" "$stem" "$pdf" "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$build_dir" >/dev/null
+  # Initial compile so the viewer has something to show immediately — skipped
+  # when hxp already rendered the first frame before launching the viewer.
+  if (( no_initial == 0 )); then
+    _hxp_compile_once "$src" "$ext" "$dir" "$stem" "$pdf" "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$build_dir" >/dev/null
+  fi
 
   (( quiet == 0 )) && print -- "wpdf: watching $src -> $pdf"
 
@@ -234,10 +246,14 @@ wpdf() {
     local root_src; root_src="$(_hxp_root_for "$src" typ)"
     local root_dir="${root_src:h}"
 
-    # `typst watch` writes the PDF in-place on each successful compile.
-    # Errors stream to stderr and we mirror them into err_log; the PDF stays
-    # at the last known-good build (zathura/sioyek auto-reload picks it up).
-    typst watch --root "$root_dir" "$root_src" "$pdf" 2>"$err_log"
+    # `typst watch` writes the PDF in-place on each successful compile and only
+    # streams diagnostics on failure. Pipe its status stream through the render
+    # helper so compile *errors* also surface — an error PDF over the stale
+    # build plus err_md for hxp_errs — matching the tex/md behaviour. (Set
+    # HXP_NO_NATIVE_TYP=1 to use the generic loop instead.)
+    typst watch --root "$root_dir" "$root_src" "$pdf" 2>&1 \
+      | _hxp_typst_watch_render "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf"
+    _hxp_sweep_artifacts "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" "$build_dir"
     return
   fi
 
@@ -247,7 +263,9 @@ wpdf() {
   # inotifywait. Falls back to inotifywait when not installed.
   if _hxp_need_cmd watchexec && [[ "$HXP_NO_WATCHEXEC" != "1" ]]; then
     (( quiet == 0 )) && print -- "wpdf: watchexec mode"
-    exec watchexec \
+    # Not `exec` — keep the wpdf shell alive so its cleanup trap fires on exit
+    # (hxp reaps this child explicitly; see its cleanup()).
+    watchexec \
       --debounce 250ms \
       --postpone \
       --no-process-group \
@@ -258,6 +276,8 @@ wpdf() {
       -- hxp-compile "$src" "$ext" "$dir" "$stem" \
                     "$pdf" "$temp_pdf" "$err_log" "$err_md" \
                     "$debug_tex" "$build_dir"
+    _hxp_sweep_artifacts "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" "$build_dir"
+    return
   fi
 
   # Fallback: inotifywait with a manual 200ms drain.
@@ -281,6 +301,8 @@ wpdf() {
       -e close_write -e moved_to \
       --format '%w%f' "$dir"
   )
+
+  _hxp_sweep_artifacts "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" "$build_dir"
 }
 
 
@@ -289,8 +311,13 @@ hxp() {
   setopt pipefail
   unsetopt monitor
 
+  if [[ "$1" == "--doctor" || "$1" == "doctor" ]]; then
+    _hxp_doctor
+    return 0
+  fi
+
   local src="$1"
-  [[ -z "$src" ]] && { print -u2 "usage: hxp <file.{md,tex,typ}>"; return 2; }
+  [[ -z "$src" ]] && { print -u2 "usage: hxp <file.{md,tex,typ}>  |  hxp --doctor"; return 2; }
 
   if [[ ! -f "$src" ]]; then
     case "${${src:t}:e}" in
@@ -378,7 +405,9 @@ hxp() {
   local zpid=$!
   _hxp_tile_viewer_when_ready "$viewer" "$zpid" "$pdf"
 
-  HXP_VIEWER_PID=$zpid HXP_VIEWER_KIND=$viewer wpdf -q "$src" >/dev/null 2>&1 &!
+  # --no-initial: we already ran _hxp_compile_once above; don't make the
+  # watcher repeat the first full build on startup.
+  HXP_VIEWER_PID=$zpid HXP_VIEWER_KIND=$viewer wpdf -q --no-initial "$src" >/dev/null 2>&1 &!
   local wpid=$!
 
 

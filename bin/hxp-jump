@@ -18,27 +18,12 @@
 
 set -u
 
-# Map a tex line number to the corresponding markdown line using a longest-
-# unique-word heuristic. Mirrors _hxp_guess_md_line_from_tex in hxp-lib.zsh.
+# Map a tex line number to the corresponding markdown line. The heuristic
+# lives in the shared `hxp-mdline` helper (also used by hxp-lib.zsh's error
+# renderer) so the two copies can't drift. No-op if it isn't on PATH.
 guess_md_line() {
-  local md="$1" tex="$2" tex_line="$3"
-  [[ -z "$tex_line" || ! -f "$tex" || ! -f "$md" ]] && return 0
-
-  local start end chunk sig
-  start=$(( tex_line - 3 )); (( start < 1 )) && start=1
-  end=$(( tex_line + 3 ))
-
-  chunk="$(sed -n "${start},${end}p" "$tex" 2>/dev/null \
-    | sed -E 's/\\[A-Za-z@]+(\*|)(\[[^]]*\])?(\{[^}]*\})?//g; s/[{}\\]/ /g; s/[[:space:]]+/ /g')"
-
-  sig="$(printf '%s' "$chunk" \
-    | tr ' ' '\n' \
-    | sed -E 's/[^[:alnum:]\-_.]//g' \
-    | awk 'length($0)>=8 { if (length($0)>max) { max=length($0); best=$0 } } END{ print best }')"
-
-  [[ -z "$sig" ]] && return 0
-
-  grep -nF -- "$sig" "$md" 2>/dev/null | head -n 1 | cut -d: -f1
+  command -v hxp-mdline >/dev/null 2>&1 || return 0
+  hxp-mdline "$1" "$2" "$3"
 }
 
 target="${1:-}"

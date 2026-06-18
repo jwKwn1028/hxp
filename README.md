@@ -38,6 +38,14 @@ leaving the editor.
 - Multi-error reporting: typst halts at the first error by default, but
   pandoc/latex cascading errors get a windowed extract with an
   approximate count in the error PDF header.
+- Uniform error surfacing across all three languages: a failed compile
+  renders an error PDF and flips `hxp_errs` to ERROR. This now includes
+  the default `typst watch` path (previously typst errors were silent —
+  the viewer kept showing the last good PDF). Typst error PDFs are rendered
+  with typst itself, so `.typ` users don't need a LaTeX toolchain.
+- `hxp --doctor` &mdash; one screen showing which tools are detected and,
+  for each missing one, the feature it disables. Run it first when
+  something isn't behaving.
 
 ## Install
 
@@ -60,6 +68,8 @@ Then add this single line to `~/.zshrc`:
 | `zsh/hxp-lib.zsh` | `~/.zsh/hxp-lib.zsh` |
 | `bin/hxp-compile` | `~/.local/bin/hxp-compile` |
 | `bin/hxp-jump` | `~/.local/bin/hxp-jump` |
+| `bin/hxp-mdline` | `~/.local/bin/hxp-mdline` |
+| `bin/hxp-dual-panelify` | `~/.local/bin/hxp-dual-panelify` |
 | `config/zathura/zathurarc` | `~/.config/zathura/zathurarc` |
 | `config/sioyek/prefs_user.config` | `~/.config/sioyek/prefs_user.config` |
 | `config/sioyek/keys_user.config` | `~/.config/sioyek/keys_user.config` |
@@ -77,8 +87,13 @@ The canonical list lives in `install.sh`. Print it without installing:
 
 In short: `zsh`, `helix`, `pandoc`, and `inotify-tools` are required;
 `watchexec`, `xelatex`, `latexmk`, `typst`, `wmctrl`, `xprop`, and
-`sioyek` or `zathura` are recommended. For CJK markdown PDFs install
+`sioyek` or `zathura` are recommended; `tmux` / `xdotool` make PDF→editor
+inverse search land in your running helix. For CJK markdown PDFs install
 `fonts-noto-cjk` (Debian/Ubuntu) or set `HXP_CJK_FONT="Your Font"`.
+
+Any `awk` works (gawk, mawk, busybox) — no gawk-only features are used.
+After installing, run `hxp --doctor` to see which features are active and
+what each missing tool would enable.
 
 ## Display server
 
@@ -123,10 +138,12 @@ heuristic guesses wrong on your setup.
 |---|---|
 | `HXP_VIEWER` | Force `sioyek` or `zathura` instead of auto-detect. |
 | `HXP_CJK_FONT` | Override the CJK font for markdown PDFs. |
-| `HXP_NO_NATIVE_TYP=1` | Use the generic compile loop instead of `typst watch`. |
+| `HXP_NO_NATIVE_TYP=1` | Use the generic compile loop instead of `typst watch` (full recompiles; same error surfacing). |
 | `HXP_NO_WATCHEXEC=1` | Fall back to `inotifywait` instead of `watchexec`. |
 | `HXP_NO_TILE=1` | Disable wmctrl tiling of editor / viewer windows. |
 | `HXP_WM` | Force `tiling` or `floating` instead of auto-detect (see Display server). |
+| `HXP_SIOYEK_VENV` | Path to the sioyek-python-extensions venv (default `${XDG_DATA_HOME:-~/.local/share}/sioyek-extensions`). |
+| `HXP_AWK` | Force a specific awk binary for log parsing (mainly for the tests). |
 
 ## Layout
 
@@ -138,18 +155,36 @@ hxp/
 │   ├── hxp-main.zsh   # hxp() / wpdf() / tiling helpers
 │   └── hxp-lib.zsh    # _hxp_compile_once / error rendering / hxp_errs
 ├── bin/
-│   ├── hxp-compile    # watchexec-driven recompile wrapper
-│   └── hxp-jump       # synctex inverse-search shim
-└── config/
-    ├── zathura/zathurarc
-    └── sioyek/
-        ├── prefs_user.config
-        └── keys_user.config
+│   ├── hxp-compile        # watchexec-driven recompile wrapper
+│   ├── hxp-jump           # synctex inverse-search shim
+│   ├── hxp-mdline         # shared md<-tex line-mapping heuristic
+│   └── hxp-dual-panelify  # sioyek dual-panel wrapper (PATH-resolved)
+├── config/
+│   ├── zathura/zathurarc
+│   └── sioyek/
+│       ├── prefs_user.config
+│       └── keys_user.config
+└── test/
+    ├── parse-test.zsh     # toolchain-free compiler-log parser tests
+    └── smoke.zsh          # per-language compile + typst-watch tests
 ```
 
 `hxp-main.zsh` sources `hxp-lib.zsh`. The compile helpers in `hxp-lib.zsh`
 are kept separate so `hxp-compile` (invoked per save by watchexec) can
 load them without paying the cost of sourcing the rest of `.zshrc`.
+
+## Tests
+
+```sh
+zsh test/parse-test.zsh   # compiler-log parsers, run under every awk present
+zsh test/smoke.zsh        # good/bad compile per language (+ typst watch loop)
+```
+
+`parse-test.zsh` needs no compilers (the fast gate; it also runs in CI under
+both gawk and mawk to keep the log parsers POSIX-awk clean). `smoke.zsh`
+exercises the real pipeline and **skips** any language whose tools aren't
+installed, so it's useful with a partial toolchain too. Both run on every
+push via `.github/workflows/ci.yml`.
 
 ## Runtime files
 

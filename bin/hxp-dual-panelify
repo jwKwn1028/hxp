@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Wrapper around sioyek-python-extensions' dual_panelify. Referenced by name
+# (on PATH) from config/sioyek/prefs_user.config so that config can stay
+# user-agnostic instead of hardcoding an absolute venv path — sioyek can't
+# expand $HOME itself, but it does resolve bare command names on PATH (the
+# same mechanism hxp-jump relies on).
+#
+# The `sioyek` python package is library-only (pipx rejects it), so it lives
+# in a dedicated venv. Override the location with $HXP_SIOYEK_VENV.
+#
+# Usage (from sioyek): hxp-dual-panelify <sioyek_path> <file_path> <command_text>
+
+set -euo pipefail
+
+venv="${HXP_SIOYEK_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/sioyek-extensions}"
+py="$venv/bin/python"
+
+if [[ ! -x "$py" ]]; then
+  echo "hxp-dual-panelify: no python venv at $venv" >&2
+  echo "  create it with: python3 -m venv \"$venv\" && \"$py\" -m pip install sioyek" >&2
+  exit 1
+fi
+
+exec "$py" -m sioyek.dual_panelify "$@"

@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Shared markdown<-tex line-mapping heuristic, used by BOTH hxp-jump (PDF
+# inverse search) and hxp-lib.zsh's error renderer so the two can't drift.
+#
+# Maps a line in pandoc's generated .tex back to the most likely line in the
+# original .md: take a small window of tex around the line, strip latex
+# control sequences, pick the longest alphanumeric token, and find its first
+# occurrence in the markdown.
+#
+# Usage: hxp-mdline <md-file> <tex-file> <tex-line>
+# Prints the markdown line number on success; prints nothing if it can't map.
+
+set -u
+
+md="${1:-}"
+tex="${2:-}"
+tex_line="${3:-}"
+
+[[ -z "$tex_line" || ! -f "$tex" || ! -f "$md" ]] && exit 0
+
+start=$(( tex_line - 3 )); (( start < 1 )) && start=1
+end=$(( tex_line + 3 ))
+
+chunk="$(sed -n "${start},${end}p" "$tex" 2>/dev/null \
+  | sed -E 's/\\[A-Za-z@]+(\*|)(\[[^]]*\])?(\{[^}]*\})?//g; s/[{}\\]/ /g; s/[[:space:]]+/ /g')"
+
+sig="$(printf '%s' "$chunk" \
+  | tr ' ' '\n' \
+  | sed -E 's/[^[:alnum:]\-_.]//g' \
+  | awk 'length($0)>=8 { if (length($0)>max) { max=length($0); best=$0 } } END{ print best }')"
+
+[[ -z "$sig" ]] && exit 0
+
+grep -nF -- "$sig" "$md" 2>/dev/null | head -n 1 | cut -d: -f1
