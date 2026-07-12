@@ -76,40 +76,69 @@ state_dir="${XDG_RUNTIME_DIR:-/tmp}/hxp"
 state_key="$(printf '%s' "$realfile" | sha1sum | cut -d' ' -f1)"
 state_file="$state_dir/$state_key.state"
 
+# Is PID a live process? `kill -0` sends no signal, it only tests existence
+# (and signalability). Guards against a stale state file — left behind when an
+# hxp session was killed hard, before its cleanup ran — steering a jump into a
+# tmux pane or X11 window id the OS has since handed to something else. A false
+# positive needs the exact PID recycled to another of *our* processes between
+# that crash and this click: narrow enough that the check still kills the common
+# "typed :open into the wrong window" misfire.
+pid_alive() {
+  [[ -n "${1:-}" ]] || return 1
+  kill -0 "$1" 2>/dev/null
+}
+
 read_state() {
   tmux_socket=""
   tmux_pane=""
   window_id=""
+  state_pid=""
+  state_src=""
   [[ -r "$1" ]] || return 1
   while IFS='=' read -r k v; do
     case "$k" in
+      src)       state_src="$v" ;;
       tmux)      tmux_socket="$v" ;;
       tmux_pane) tmux_pane="$v" ;;
       windowid)  window_id="$v" ;;
+      pid)       state_pid="$v" ;;
     esac
   done < "$1"
 }
 
 read_state "$state_file"
 
+# If the recorded hxp process is gone, drop (and reap) the state so a dead
+# session's pane/window can't capture the jump, and so the directory-tree
+# fallback runs instead of us trusting stale coordinates. Absent pid (older
+# state files) skips the check — behave as before.
+if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
+  rm -f -- "$state_file" 2>/dev/null || true
+  tmux_socket=""; tmux_pane=""; window_id=""
+fi
+
 # Fallback: if no exact match, scan state files for one whose source is in
 # the same directory tree — covers multi-file tex projects where synctex
-# reports an \input'd file that differs from the file passed to hxp.
+# reports an \input'd file that differs from the file passed to hxp. Skip
+# (and reap) any whose session has exited so we never drive a dead pane.
 if [[ -z "$tmux_pane" && -z "$window_id" ]]; then
   reported_dir="$(dirname "$realfile")"
   for sf in "$state_dir"/*.state; do
     [[ -r "$sf" && "$sf" != "$state_file" ]] || continue
-    sf_src=""
-    while IFS='=' read -r k v; do
-      [[ "$k" == "src" ]] && { sf_src="$v"; break; }
-    done < "$sf"
-    [[ -z "$sf_src" ]] && continue
-    sf_dir="$(dirname "$(realpath -m -- "$sf_src" 2>/dev/null || printf '%s' "$sf_src")")"
+    read_state "$sf"
+    if [[ -z "$state_src" ]]; then
+      tmux_socket=""; tmux_pane=""; window_id=""; continue
+    fi
+    if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
+      rm -f -- "$sf" 2>/dev/null || true
+      tmux_socket=""; tmux_pane=""; window_id=""; continue
+    fi
+    sf_dir="$(dirname "$(realpath -m -- "$state_src" 2>/dev/null || printf '%s' "$state_src")")"
     case "$reported_dir" in
       "$sf_dir"|"$sf_dir"/*)
-        read_state "$sf"
-        break ;;
+        break ;;                        # keep this session's pane/window id
     esac
+    tmux_socket=""; tmux_pane=""; window_id=""   # no match — reset, keep scanning
   done
 fi
 

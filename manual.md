@@ -221,6 +221,15 @@ usage: wpdf [-q] [--no-initial] <file.{md,tex,typ}>
   swap-file churn) and falls back to `inotifywait` when watchexec is absent or
   `HXP_NO_WATCHEXEC=1` is set.
 
+The watch is **project-wide, not just the opened file.** For `tex`/`typ` it
+tracks the *root's* directory (recursively) and triggers on any source or
+bibliography change — so editing an `\input`/`#include`'d sibling or the `.bib`
+rebuilds the whole document, not only saves to the file you opened. Markdown
+tracks its own directory for `.md` and `.bib` changes. hxp's own scratch files
+(the dot-prefixed logs/intermediates and the `.hxp_build_*` dir) are excluded,
+so the error PDF can't trigger a recompile loop. (Native `typst watch` already
+tracks a typst document's imports on its own.)
+
 `wpdf` sweeps its own scratch files on exit (Ctrl-C is safe — it won't take
 your interactive shell down with it).
 
@@ -286,7 +295,10 @@ Under the hood the viewer runs `hxp-jump <file>:<line>[:<col>]`, which:
    `…/.hxp_build_<stem>/<stem>.hxp.tex`, it resolves that to your original
    `<stem>.md` and approximates the line with the shared `hxp-mdline`
    heuristic.
-2. **Finds the session** via the per-source state file hxp wrote.
+2. **Finds the session** via the per-source state file hxp wrote. State from a
+   session that has since exited (killed hard, before cleanup ran) is skipped
+   and reaped — its pane/window id may have been recycled, so trusting it could
+   type the jump into an unrelated window.
 3. **Delivers the jump** by preference: `tmux send-keys` → `xdotool` keystrokes
    to the editor's X11 window → spawning a fresh `hx` as last resort.
 4. **Handles multi-file projects:** if the synctex-reported file has no exact
@@ -400,7 +412,11 @@ latexmk -pdf -synctex=1 <root.tex>   (pdflatex; -bibtex if a sibling .bib exists
   `root.tex`, or `thesis.tex` that has a `\documentclass`, and compiles that —
   so you can open and edit an `\input`'d chapter and still get the whole
   document's PDF. The PDF and synctex sidecar live next to the root.
-- **Bibliography.** A sibling `.bib` enables `-bibtex` automatically.
+- **Live on any project file.** The watch covers the root's whole directory
+  tree, so saving *any* `\input`/`\include`'d chapter (or a `.sty`/`.cls`)
+  rebuilds the PDF — not just the file you opened with `hxp`.
+- **Bibliography.** A sibling `.bib` enables `-bibtex` automatically, and
+  editing it re-runs the build.
 
 ### Typst (`.typ`)
 

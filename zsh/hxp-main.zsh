@@ -258,6 +258,19 @@ wpdf() {
   fi
 
   # Generic watch loop (md, tex, and typ when native disabled).
+  #
+  # Watch the whole *project*, not just the opened file: a multi-file tex/typ
+  # doc rebuilds when a sibling \input/#include or the .bib changes, not only
+  # when the file you opened is saved. The root often lives in a different dir
+  # than the opened file, so watch the root's directory; markdown has no root,
+  # so root_dir collapses to the source's own dir. _hxp_watch_exts/_hxp_watch_match
+  # decide which changes count (and exclude hxp's own artifacts).
+  local root_src; root_src="$(_hxp_root_for "$src" "$ext")"
+  local watch_dir="${root_src:h}"
+  local watch_exts; watch_exts="$(_hxp_watch_exts "$ext")"
+  local -a inotify_recurse=()
+  [[ "$ext" == "tex" || "$ext" == "typ" ]] && inotify_recurse=( -r )
+
   # Prefer `watchexec` — kernel-level debouncing, follows symlinks,
   # respects gitignore, handles editor swap-file dance better than raw
   # inotifywait. Falls back to inotifywait when not installed.
@@ -265,14 +278,22 @@ wpdf() {
     (( quiet == 0 )) && print -- "wpdf: watchexec mode"
     # Not `exec` — keep the wpdf shell alive so its cleanup trap fires on exit
     # (hxp reaps this child explicitly; see its cleanup()).
+    #
+    # `--ignore '**/.*'` drops every one of hxp's dot-prefixed artifacts (the
+    # .md error doc shares markdown's watched extension and would otherwise
+    # loop) — watchexec matches ignores relative to the watched root, so a
+    # project under a hidden dir is unaffected. The build-dir glob drops the
+    # md->tex intermediate, whose basename isn't dotted.
     watchexec \
       --debounce 250ms \
       --postpone \
       --no-process-group \
       --no-vcs-ignore \
       --quiet \
-      -w "$dir" \
-      --filter "$base" \
+      -w "$watch_dir" \
+      -e "$watch_exts" \
+      --ignore "**/.*" \
+      --ignore "**/.hxp_build_*/**" \
       -- hxp-compile "$src" "$ext" "$dir" "$stem" \
                     "$pdf" "$temp_pdf" "$err_log" "$err_md" \
                     "$debug_tex" "$build_dir"
@@ -280,15 +301,18 @@ wpdf() {
     return
   fi
 
-  # Fallback: inotifywait with a manual 200ms drain.
+  # Fallback: inotifywait with a manual 200ms drain. Same project-wide scope —
+  # watch the root dir (recursively for tex/typ, whose includes may sit in
+  # subdirs) and let _hxp_watch_match filter out irrelevant paths and our own
+  # artifacts, the job watchexec does above via -e / --ignore.
   local changed _drain
   while IFS= read -r changed; do
-    [[ "$changed" != "$src" ]] && continue
+    _hxp_watch_match "$ext" "$changed" || continue
     while IFS= read -r -t 0.2 _drain 2>/dev/null; do :; done
 
-    # If the source was removed (rm, or atomic-rename gone wrong), stop
-    # rather than burning compiles on a missing file. The user's next
-    # `hxp` invocation will re-scaffold or open the new path cleanly.
+    # If the primary source was removed (rm, or atomic-rename gone wrong), stop
+    # rather than burning compiles on a missing file. The user's next `hxp`
+    # invocation will re-scaffold or open the new path cleanly.
     [[ -f "$src" ]] || { (( quiet == 0 )) && print -- "wpdf: source vanished, exiting"; break; }
 
     if _hxp_compile_once "$src" "$ext" "$dir" "$stem" "$pdf" "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$build_dir" >/dev/null; then
@@ -297,9 +321,9 @@ wpdf() {
       (( quiet == 0 )) && print -- "wpdf: ERR $(date +%H:%M:%S)  (see $err_log)"
     fi
   done < <(
-    inotifywait -m -q \
+    inotifywait -m -q "${inotify_recurse[@]}" \
       -e close_write -e moved_to \
-      --format '%w%f' "$dir"
+      --format '%w%f' "$watch_dir"
   )
 
   _hxp_sweep_artifacts "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" "$build_dir"

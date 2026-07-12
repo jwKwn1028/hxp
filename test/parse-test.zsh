@@ -87,6 +87,31 @@ for a in $awks; do
         "$(HXP_AWK=$a _hxp_primary_error "$typst_log")"
 done
 
+# ---- watch scope: _hxp_watch_exts / _hxp_watch_match ------------------
+# Pure, awk-free — pins the extension sets and, crucially, the exclusions that
+# stop hxp's own artifacts (the .md error doc, the md->tex intermediate) from
+# self-triggering a recompile loop under the inotifywait fallback.
+print -r -- "  [watch scope]"
+check "md exts"   "md,bib"           "$(_hxp_watch_exts md)"
+check "tex exts"  "tex,bib,sty,cls"  "$(_hxp_watch_exts tex)"
+check "typ exts"  "typ,bib,yml,yaml" "$(_hxp_watch_exts typ)"
+
+wm() { _hxp_watch_match "$1" "$2" && print 1 || print 0 }
+# fires: opened file, nested include, sibling bib
+check "tex src"       1 "$(wm tex /p/main.tex)"
+check "tex nested"    1 "$(wm tex /p/chapters/intro.tex)"
+check "tex sibling bib" 1 "$(wm tex /p/refs.bib)"
+check "md src"        1 "$(wm md /p/notes.md)"
+check "md sibling bib" 1 "$(wm md /p/refs.bib)"
+check "typ include"   1 "$(wm typ /p/sections/a.typ)"
+# quiet: wrong ext, our dot-artifacts, build-dir churn, rendered output
+check "tex wrong ext" 0 "$(wm tex /p/notes.md)"
+check "md err doc"    0 "$(wm md /p/.notes.error.md)"
+check "md debug tex"  0 "$(wm md /p/.notes.debug.tex)"
+check "build-dir tex" 0 "$(wm md /p/.hxp_build_notes/notes.hxp.tex)"
+check "output pdf"    0 "$(wm tex /p/main.pdf)"
+check "typ errdoc"    0 "$(wm typ /p/.t.tmp.errdoc.typ)"
+
 if (( fail == 0 )); then
   print -r -- "PARSE TESTS PASSED"
   exit 0

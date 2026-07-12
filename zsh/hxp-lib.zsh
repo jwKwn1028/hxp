@@ -164,6 +164,42 @@ _hxp_md_declares_bibliography() {
   ' "$src" 2>/dev/null
 }
 
+# ---- watch scope -------------------------------------------------------
+# The live-preview watch is project-wide, not just the opened file: editing a
+# sibling \input/#include or the .bib must rebuild the root, not only saves to
+# the file you happened to open. These two helpers define what counts as a
+# "project-relevant change", shared by wpdf's watchexec and inotifywait paths
+# so the two can't drift.
+
+# Extensions (comma list, for `watchexec -e`) whose changes trigger a rebuild,
+# given the primary source's type. Includes bibliography inputs (.bib, and
+# typst's .yml/.yaml) so editing references re-renders.
+_hxp_watch_exts() {
+  case "$1" in
+    md)  print -r -- 'md,bib' ;;
+    tex) print -r -- 'tex,bib,sty,cls' ;;
+    typ) print -r -- 'typ,bib,yml,yaml' ;;
+    *)   print -r -- "$1" ;;
+  esac
+}
+
+# True if a changed path should trigger a rebuild: a watched extension, and not
+# one of hxp's own transient artifacts. Every artifact we write is either
+# dot-prefixed (.<stem>.error.md, .<stem>.debug.tex, the .tmp/.errdoc files) or
+# lives inside a .hxp_build_* dir, so excluding those two classes stops the
+# markdown error doc (a .md) and the md->tex intermediate (a .tex) from
+# self-triggering a compile loop. Mirrors the `--ignore '**/.*' --ignore
+# '**/.hxp_build_*/**'` rules wpdf hands watchexec; kept in sync for the
+# inotifywait fallback which has to filter in-loop.
+_hxp_watch_match() {
+  emulate -L zsh
+  local ext="$1" path="$2" cbase="${2:t}"
+  [[ "$cbase" == .* ]] && return 1                # our dot-prefixed artifacts
+  [[ "$path" == *.hxp_build_*/* ]] && return 1     # build-dir churn
+  local exts=",$(_hxp_watch_exts "$ext"),"
+  [[ "$exts" == *",${cbase:e},"* ]]
+}
+
 # No-op: both viewers handle reload natively.
 #   * zathura uses its own inotify watcher (`reload-file` / `file_changed`)
 #     and re-renders on disk change — SIGHUP is NOT a reload signal in
