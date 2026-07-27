@@ -147,19 +147,23 @@ _hxp_bib_for() {
   print -r -- "${bibs[1]}"
 }
 
-# True if the markdown source's YAML frontmatter declares a `bibliography:`
-# key. When it does, citeproc will load that file on its own — we must not
-# also pass --bibliography=, or the bib loads twice and entries duplicate.
-_hxp_md_declares_bibliography() {
+# True if the markdown source's YAML frontmatter declares <key>. Scoped to the
+# frontmatter block on purpose: a `bibliography:`/`geometry:` mentioned in prose
+# or inside a fenced code block must not count as the document setting it.
+# Callers use this to decide whether a document has already spoken for a
+# setting, and back off rather than fight it (e.g. declaring `bibliography:`
+# means citeproc loads the bib itself — passing --bibliography= too would load
+# it twice and duplicate every entry).
+_hxp_md_declares_key() {
   emulate -L zsh
-  local src="$1" awk_bin
-  [[ -f "$src" ]] || return 1
+  local src="$1" key="$2" awk_bin
+  [[ -f "$src" && -n "$key" ]] || return 1
   awk_bin="$(_hxp_awk)"
 
-  "$awk_bin" '
+  "$awk_bin" -v key="$key" '
     NR == 1 && /^---[[:space:]]*$/ { fm = 1; next }
     fm && /^(---|\.\.\.)[[:space:]]*$/ { exit }
-    fm && /^[[:space:]]*bibliography[[:space:]]*:/ { found = 1; exit }
+    fm && $0 ~ "^[[:space:]]*" key "[[:space:]]*:" { found = 1; exit }
     END { exit !found }
   ' "$src" 2>/dev/null
 }
@@ -728,15 +732,26 @@ _hxp_compile_once() {
       pdf_vars=( -V colorlinks=true -V linkcolor=blue -V urlcolor=blue )
 
       local -a cite_args
-      if _hxp_md_declares_bibliography "$src"; then
+      if _hxp_md_declares_key "$src" bibliography; then
         cite_args=( --citeproc )
       elif [[ -n "$bib" ]]; then
         cite_args=( --citeproc --bibliography="$bib" )
       fi
 
-      if ! grep -q -E '^[[:space:]]*CJKmainfont[[:space:]]*:' -- "$src" 2>/dev/null; then
+      if ! _hxp_md_declares_key "$src" CJKmainfont; then
         local cjk_font; cjk_font="$(_hxp_cjk_font)"
         [[ -n "$cjk_font" ]] && pdf_vars+=( -V "CJKmainfont=$cjk_font" )
+      fi
+
+      # Pandoc's latex template only emits \usepackage{geometry} when a geometry
+      # variable is set, so markdown otherwise inherits article's ~1.85in
+      # margins. A bare length ("0.75in") becomes margin=<length>; anything
+      # containing "=" goes to the geometry package verbatim ("top=2cm,left=3cm").
+      # HXP_MD_MARGIN="" opts out entirely and keeps the class defaults.
+      local md_margin="${HXP_MD_MARGIN-0.75in}"
+      if [[ -n "$md_margin" ]] && ! _hxp_md_declares_key "$src" geometry; then
+        [[ "$md_margin" == *=* ]] || md_margin="margin=$md_margin"
+        pdf_vars+=( -V "geometry=$md_margin" )
       fi
 
       if _hxp_need_cmd latexmk; then

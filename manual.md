@@ -390,6 +390,14 @@ search**.
   `--bibliography`, which would double-load and duplicate entries). Otherwise,
   if a single sibling `.bib` exists next to the source, it's auto-passed as
   `--citeproc --bibliography=<that.bib>`.
+- **Margins.** Pandoc's LaTeX template only loads the `geometry` package when a
+  `geometry` variable is set, so Markdown would otherwise inherit `article`'s
+  very wide defaults (~1.85in). hxp passes `0.75in` on all four sides. Override
+  with `HXP_MD_MARGIN` — a bare length (`HXP_MD_MARGIN=2cm`) applies to all
+  sides, while anything containing `=` goes to the `geometry` package verbatim
+  (`HXP_MD_MARGIN="top=2cm,left=3cm"`). `HXP_MD_MARGIN=` (empty) opts out and
+  restores the class defaults. If your frontmatter sets `geometry:`, hxp leaves
+  it alone — the document always wins.
 - **CJK.** For Korean/Japanese/Chinese glyphs, hxp auto-selects a CJK font for
   the xelatex/lualatex engine (so they render instead of vanishing). It probes,
   in order: *Noto Sans CJK KR*, *Noto Serif CJK KR*, *NanumGothic*,
@@ -477,6 +485,7 @@ Notes:
 |---|---|
 | `HXP_VIEWER` | Force `sioyek` or `zathura` instead of auto-detect (sioyek preferred when both present). |
 | `HXP_CJK_FONT` | Override the CJK font family for Markdown PDFs. |
+| `HXP_MD_MARGIN` | Page margins for Markdown PDFs (default `0.75in`). Bare length = all sides; contains `=` → passed to `geometry` verbatim; empty = LaTeX class defaults. Frontmatter `geometry:` overrides it. |
 | `HXP_NO_NATIVE_TYP=1` | Use the generic compile loop instead of `typst watch` (full recompiles; same error surfacing). |
 | `HXP_NO_WATCHEXEC=1` | Use `inotifywait` instead of `watchexec` for the generic loop. |
 | `HXP_NO_TILE=1` | Disable `wmctrl` tiling of the editor / viewer windows. |
@@ -552,6 +561,7 @@ doctor names the exact feature each one gates.
 | Inverse search does nothing in a `.md` | Markdown synctex needs `latexmk`. Without it the Markdown path can't emit synctex. (`.typ` has no synctex at all — that's expected.) |
 | Windows don't tile | You're on Wayland, or missing `wmctrl`/`xprop`, or on a tiling WM (it defers to the WM). See [Window tiling](#window-tiling); override with `HXP_WM`. |
 | CJK glyphs missing in a Markdown PDF | Install `fonts-noto-cjk` or set `HXP_CJK_FONT="Your Font"`. Confirm the resolved font in doctor's *Extras* row. |
+| Markdown PDF margins are wrong | Set `HXP_MD_MARGIN` (e.g. `0.5in`), or put `geometry:` in the document's frontmatter for a per-file value. If margins ignore both, check that `geometry:` isn't set in frontmatter — the document wins over the env var. |
 | `.tex` Unicode/fontspec fails under pdflatex | `.tex` compiles with `latexmk -pdf` (pdflatex). Configure xelatex/lualatex yourself via `latexmkrc` or a `% !TEX program` directive. |
 | Bibliography entries appear twice | Don't declare `bibliography:` in YAML *and* rely on a sibling `.bib` — pick one. With the YAML key present, hxp uses `--citeproc` alone. |
 | Typst errors seem silent | They shouldn't be — the error PDF + `hxp_errs` flip should fire. If you set `HXP_NO_NATIVE_TYP=1`, the generic loop is in play; either way errors surface. |

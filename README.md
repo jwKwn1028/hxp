@@ -35,6 +35,9 @@ leaving the editor.
   live pane is reachable.
 - CJK font auto-selection for Markdown PDFs (Korean / Japanese / Chinese
   glyphs render instead of disappearing). Override via `HXP_CJK_FONT`.
+- Sane Markdown page margins (`0.75in`, vs the ~1.85in LaTeX `article`
+  inherits by default). Override via `HXP_MD_MARGIN`, or per document with a
+  `geometry:` key in the frontmatter.
 - Multi-error reporting: typst halts at the first error by default, but
   pandoc/latex cascading errors get a windowed extract with an
   approximate count in the error PDF header.
@@ -138,6 +141,7 @@ heuristic guesses wrong on your setup.
 |---|---|
 | `HXP_VIEWER` | Force `sioyek` or `zathura` instead of auto-detect. |
 | `HXP_CJK_FONT` | Override the CJK font for markdown PDFs. |
+| `HXP_MD_MARGIN` | Page margins for markdown PDFs (default `0.75in`). A bare length (`2cm`) means all four sides; anything with an `=` is passed to the `geometry` package verbatim (`top=2cm,left=3cm`). Set empty to keep LaTeX's class defaults. Ignored if the document's frontmatter sets `geometry:`. |
 | `HXP_NO_NATIVE_TYP=1` | Use the generic compile loop instead of `typst watch` (full recompiles; same error surfacing). |
 | `HXP_NO_WATCHEXEC=1` | Fall back to `inotifywait` instead of `watchexec`. |
 | `HXP_NO_TILE=1` | Disable wmctrl tiling of editor / viewer windows. |
