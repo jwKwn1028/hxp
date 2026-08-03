@@ -41,7 +41,7 @@ compile() {  # src ext
 if _hxp_need_cmd pandoc; then
   print -r -- "  [markdown]"
   d="$work/md"; mkdir -p "$d"
-  print -rl -- '# Hello' '' 'World.' >| "$d/a.md"
+  print -rl -- '# Hello' '' 'Inline \(x\).' '' '\[' '\operatorname{CAS}(n_e,n_o)' '\]' >| "$d/a.md"
   compile "$d/a.md" md; rc=$?
   check "md good rc"  0 "$rc"
   check "md good pdf" 1 "$(is_pdf "$d/a.pdf" && echo 1 || echo 0)"

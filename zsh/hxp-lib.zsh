@@ -710,6 +710,7 @@ _hxp_typst_watch_render() {
 _hxp_compile_once() {
   emulate -L zsh
   setopt pipefail clobber
+  local -x PATH="/usr/bin:$PATH"  # Conda's Pandoc 2.12 ignores the enabled math syntax.
   local src="$1" ext="$2" dir="$3" stem="$4"
   local pdf="$5" temp_pdf="$6" err_log="$7" err_md="$8" debug_tex="$9" build_dir="${10}"
 
