@@ -1,5 +1,8 @@
 set selection-clipboard clipboard
 
+# Hide the statusbar by default; Ctrl+n still toggles it.
+set guioptions ""
+
 # SyncTeX: jump from PDF (Ctrl+click) into the source via helix.
 # `hxp-jump` reads the per-source state file hxp() writes in
 # $XDG_RUNTIME_DIR/hxp and, if hxp was launched inside tmux, drives the
