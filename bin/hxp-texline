@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# Maps a .md line onto pandoc's generated .hxp.tex. The mirror of hxp-mdline,
+# which goes the other way for inverse search.
+#
+# Forward search needs this because synctex records only the .hxp.tex — a query
+# naming the .md matches nothing ("SyncTeX Warning: No tag for <file>.md").
+#
+# Anchors on the line's own text, which pandoc copies through near-verbatim:
+# whole line, then shorter leading word-prefixes (long paragraphs get reflowed
+# at ~72 columns), then single words.
+#
+# Usage: hxp-texline <md-file> <tex-file> <md-line>
+# Prints the tex line number, or nothing if it can't map.
+
+set -u
+
+md="${1:-}"
+tex="${2:-}"
+md_line="${3:-}"
+
+[[ -z "$md_line" || ! -f "$md" || ! -f "$tex" ]] && exit 0
+
+# Body only: preamble words (title, author, package options) collide with prose.
+body_start="$(grep -n -m1 -F '\begin{document}' "$tex" 2>/dev/null | cut -d: -f1)"
+[[ -z "$body_start" ]] && body_start=1
+
+md_total="$(awk 'END { print NR }' "$md" 2>/dev/null)"
+[[ -z "$md_total" || "$md_total" -eq 0 ]] && exit 0
+tex_total="$(awk 'END { print NR }' "$tex" 2>/dev/null)"
+[[ -z "$tex_total" || "$tex_total" -eq 0 ]] && exit 0
+
+# Furthest a floor may plausibly sit. md and tex advance together, so a floor
+# well past the proportional position means the anchor matched a recurrence —
+# a contents entry naming a section that appears again far below. Doubled and
+# padded, so it only rejects the clearly wrong.
+floor_limit="$(awk -v b="$body_start" -v t="$tex_total" -v l="$md_line" -v m="$md_total" \
+  'BEGIN { printf "%d", b + (l / m) * (t - b) * 2 + 50 }')"
+
+# Reduce to the prose pandoc carries across. Inline code and link targets go
+# first — those it rewrites (\texttt{}, \href{}).
+strip_md() {
+  sed -n "${1}p" "$md" 2>/dev/null \
+    | sed -E '
+        s/`[^`]*`/ /g
+        s/\[([^]]*)\]\([^)]*\)/\1/g
+        s/^[[:space:]]*[-*+][[:space:]]+/ /
+        s/^[[:space:]]*[0-9]+\.[[:space:]]+/ /
+        s/[][*_#>|~^`]+/ /g
+        s/[[:space:]]+/ /g
+        s/^ //
+        s/ $//
+      '
+}
+
+# index(), not a regex match: anchors are literal text and carry ".", "-", "$".
+find_in_tex() {  # <anchor> <start-line>
+  awk -v start="$2" -v tok="$1" '
+    NR >= start && index($0, tok) { print NR; exit }
+  ' "$tex" 2>/dev/null
+}
+
+# Anchors for one md line, most specific first.
+candidates_for() {
+  local text
+  text="$(strip_md "$1")"
+  [[ -z "$text" ]] && return 0
+
+  local -a words
+  read -r -a words <<< "$text"
+  (( ${#words[@]} == 0 )) && return 0
+
+  local i
+  for (( i = ${#words[@]}; i >= 2; i-- )); do
+    printf '%s\n' "${words[*]:0:i}"
+  done
+
+  printf '%s\n' "${words[@]}" \
+    | sed -E 's/[^[:alnum:]_.-]//g' \
+    | awk 'length($0) >= 4 { print length($0), $0 }' \
+    | sort -rn -k1,1 \
+    | awk '!seen[$2]++ { print $2 }'
+}
+
+# An opening prefix of a nearby line, to pin the search below. Deliberately not
+# the whole line: pandoc reflows paragraphs, so a wrapped md line is split
+# across tex lines and never matches contiguously.
+floor_anchor_for() {
+  local text
+  local -a w
+  text="$(strip_md "$1")"
+  [[ -z "$text" ]] && return 0
+  read -r -a w <<< "$text"
+  (( ${#w[@]} >= 4 )) || return 0
+  printf '%s\n' "${w[*]:0:6}"
+  (( ${#w[@]} > 4 )) && printf '%s\n' "${w[*]:0:4}"
+  return 0
+}
+
+# Weak anchors (one-word list items, headings repeated in a contents list) match
+# the first occurrence document-wide. md and tex advance together, so pin the
+# search to the nearest preceding line that can be placed confidently. Landing
+# early is harmless; landing late is caught by the unpinned retry below.
+search_floor() {
+  local i cand hit
+  for (( i = md_line - 1; i >= 1 && i > md_line - 25; i-- )); do
+    while IFS= read -r cand; do
+      [[ -z "$cand" ]] && continue
+      hit="$(find_in_tex "$cand" "$body_start")"
+      if [[ -n "$hit" ]] && (( hit <= floor_limit )); then
+        printf '%s\n' "$hit"
+        return 0
+      fi
+    done < <(floor_anchor_for "$i")
+  done
+  printf '%s\n' "$body_start"
+}
+
+# Cursor line first, then nearest neighbours.
+scan_from() {  # <start-line>
+  local off probe cand hit
+  for off in 0 1 -1 2 -2 3 -3 4 -4 5 -5 6 -6; do
+    probe=$(( md_line + off ))
+    (( probe < 1 || probe > md_total )) && continue
+    while IFS= read -r cand; do
+      [[ -z "$cand" ]] && continue
+      hit="$(find_in_tex "$cand" "$1")"
+      if [[ -n "$hit" ]]; then
+        printf '%s\n' "$hit"
+        return 0
+      fi
+    done < <(candidates_for "$probe")
+  done
+  return 1
+}
+
+# A mis-placed floor can push the real match out of range — retry unpinned.
+result="$(scan_from "$(search_floor)")" || result=""
+[[ -z "$result" ]] && result="$(scan_from "$body_start")"
+
+[[ -n "$result" ]] && printf '%s\n' "$result"
+exit 0

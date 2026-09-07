@@ -25,11 +25,16 @@ Dependencies (install via your package manager):
     latexmk              .tex compile driver
     typst                .typ compiler
     sioyek or zathura    PDF viewer with reverse-search support
-    wmctrl, xprop        X11 window tiling (no-op on Wayland)
+    wmctrl, xprop        X11 tiling; wmctrl also focuses the viewer for
+                         forward search (both no-op on Wayland)
 
   Inverse search (PDF -> editor), optional:
     tmux                 in-place jumps into a running helix pane
     xdotool              X11 keystroke fallback when not in tmux
+
+  Forward search (editor -> PDF), optional:
+    pdftotext            typst text-search fallback (poppler-utils)
+    gdbus                pages a running zathura for typst (glib2)
 
   CJK markdown PDFs (Korean/Japanese/Chinese):
     fonts-noto-cjk       or set HXP_CJK_FONT to a preferred family
@@ -74,6 +79,9 @@ link "$repo/zsh/hxp-lib.zsh"              "$HOME/.zsh/hxp-lib.zsh"
 link "$repo/bin/hxp-compile"              "$HOME/.local/bin/hxp-compile"
 link "$repo/bin/hxp-jump"                 "$HOME/.local/bin/hxp-jump"
 link "$repo/bin/hxp-mdline"               "$HOME/.local/bin/hxp-mdline"
+link "$repo/bin/hxp-fwd"                  "$HOME/.local/bin/hxp-fwd"
+link "$repo/bin/hxp-texline"              "$HOME/.local/bin/hxp-texline"
+link "$repo/bin/hxp-typtext"              "$HOME/.local/bin/hxp-typtext"
 link "$repo/bin/hxp-dual-panelify"        "$HOME/.local/bin/hxp-dual-panelify"
 link "$repo/config/zathura/zathurarc"     "$HOME/.config/zathura/zathurarc"
 link "$repo/config/sioyek/prefs_user.config" "$HOME/.config/sioyek/prefs_user.config"
@@ -89,6 +97,11 @@ Done. Final step (one-time):
 
   Verify ~/.local/bin is on PATH; if not, add it before zathura/sioyek
   spawn so synctex reverse-search can find hxp-jump.
+
+  For forward search (cursor -> PDF), bind a key in ~/.config/helix/config.toml:
+
+      [keys.normal]
+      "C-l" = ":sh hxp-fwd '%{buffer_name}' %{cursor_line} %{cursor_column}"
 
 EOF
 

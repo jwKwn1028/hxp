@@ -1038,6 +1038,21 @@ _hxp_doctor() {
   else _hxp_doctor_row xdotool opt "absent — jumps spawn a fresh hx without tmux"; fi
 
   print
+  print -r -- "${C_H}Forward search (editor -> PDF)${C_R}"
+  if _hxp_need_cmd hxp-fwd; then _hxp_doctor_row hxp-fwd ok "$(command -v hxp-fwd)"
+  else _hxp_doctor_row hxp-fwd opt "not on PATH — bind C-l in helix to enable"; fi
+  if _hxp_need_cmd hxp-texline; then _hxp_doctor_row hxp-texline ok "md -> tex line mapping"
+  else _hxp_doctor_row hxp-texline opt "absent — md forward search raises the viewer only"; fi
+  if _hxp_need_cmd wmctrl; then _hxp_doctor_row wmctrl ok "focuses the window showing this PDF"
+  else _hxp_doctor_row wmctrl opt "absent — sioyek may sync the wrong window"; fi
+  if _hxp_need_cmd hxp-typtext; then _hxp_doctor_row hxp-typtext ok "typ text-search phrases (no synctex)"
+  else _hxp_doctor_row hxp-typtext opt "absent — typ forward search raises the viewer only"; fi
+  if _hxp_need_cmd pdftotext; then _hxp_doctor_row pdftotext ok "locates the page for typ text search"
+  else _hxp_doctor_row pdftotext opt "absent — typ forward search raises the viewer only"; fi
+  if _hxp_need_cmd gdbus; then _hxp_doctor_row gdbus ok "pages a running zathura for typ"
+  else _hxp_doctor_row gdbus opt "absent — typ + zathura raises the viewer only"; fi
+
+  print
   print -r -- "${C_H}Window tiling${C_R}"
   if [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]]; then
     _hxp_doctor_row session opt "wayland — external tiling unsupported"

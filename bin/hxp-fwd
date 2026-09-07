@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# Synctex forward-search shim — the counterpart to hxp-jump: cursor line in
+# helix -> matching spot in the PDF.
+#
+# Usage: hxp-fwd <source-file> <line> [col]
+#
+# Wired from helix's config.toml:
+#   "C-l" = ":sh hxp-fwd '%{buffer_name}' %{cursor_line} %{cursor_column}"
+#
+# Per language:
+#   .tex  latexmk gets the real source path, so the query goes straight through.
+#   .md   synctex names only pandoc's .hxp_build_<stem>/<stem>.hxp.tex, never
+#         the .md, so the line is remapped onto it first (hxp-texline).
+#   .typ  no synctex exists — falls back to finding the line's text in the
+#         rendered page (hxp-typtext + pdftotext). Approximate by construction.
+#
+# The PDF being written and the viewer that opened it come from the state file
+# hxp() keeps in $XDG_RUNTIME_DIR/hxp, the same one hxp-jump reads.
+
+set -u
+
+src="${1:-}"
+line="${2:-}"
+col="${3:-1}"
+
+if [[ -z "$src" || -z "$line" ]]; then
+  printf 'usage: hxp-fwd <source-file> <line> [col]\n' >&2
+  exit 2
+fi
+[[ -z "$col" ]] && col=1
+
+warn() {
+  command -v notify-send >/dev/null 2>&1 && notify-send "hxp-fwd" "$1" 2>/dev/null
+  printf 'hxp-fwd: %s\n' "$1" >&2
+}
+
+src="$(realpath -m -- "$src" 2>/dev/null || printf '%s' "$src")"
+dir="${src%/*}"
+base="${src##*/}"
+stem="${base%.*}"
+ext=""
+[[ "$base" == *.* ]] && ext="${base##*.}"
+ext="${ext,,}"
+
+# ---------- session state ------------------------------------------------
+
+state_dir="${XDG_RUNTIME_DIR:-/tmp}/hxp"
+state_key="$(printf '%s' "$src" | sha1sum | cut -d' ' -f1)"
+state_file="$state_dir/$state_key.state"
+
+state_src=""; state_pdf=""; state_viewer=""; state_pid=""
+
+read_state() {
+  state_src=""; state_pdf=""; state_viewer=""; state_pid=""
+  [[ -r "$1" ]] || return 1
+  while IFS='=' read -r k v; do
+    case "$k" in
+      src)    state_src="$v" ;;
+      pdf)    state_pdf="$v" ;;
+      viewer) state_viewer="$v" ;;
+      pid)    state_pid="$v" ;;
+    esac
+  done < "$1"
+}
+
+# `kill -0` only tests existence — same guard hxp-jump uses. A state file
+# outliving its session names a PDF nothing rebuilds and a dead viewer.
+pid_alive() {
+  [[ -n "${1:-}" ]] || return 1
+  kill -0 "$1" 2>/dev/null
+}
+
+read_state "$state_file"
+if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
+  rm -f -- "$state_file" 2>/dev/null
+  state_pdf=""; state_viewer=""
+fi
+
+# No state for this file — hxp was likely launched on the project root (an
+# \input'd chapter). Match any live session in the same tree, as hxp-jump does.
+if [[ -z "$state_pdf" ]]; then
+  for sf in "$state_dir"/*.state; do
+    [[ -r "$sf" && "$sf" != "$state_file" ]] || continue
+    read_state "$sf"
+    if [[ -z "$state_src" ]]; then
+      state_pdf=""; state_viewer=""; continue
+    fi
+    if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
+      rm -f -- "$sf" 2>/dev/null
+      state_pdf=""; state_viewer=""; continue
+    fi
+    sf_dir="$(dirname "$(realpath -m -- "$state_src" 2>/dev/null || printf '%s' "$state_src")")"
+    case "$dir" in
+      "$sf_dir"|"$sf_dir"/*) break ;;
+    esac
+    state_pdf=""; state_viewer=""
+  done
+fi
+
+# ---------- locate the PDF ----------------------------------------------
+
+pdf="$state_pdf"
+
+# No live session: guess sibling PDF, then the nearest project root's.
+if [[ -z "$pdf" || ! -f "$pdf" ]]; then
+  pdf=""
+  candidates=("$dir/$stem.pdf")
+  cur="$dir"
+  while [[ -n "$cur" && "$cur" != "/" ]]; do
+    for n in main.tex main.typ root.tex thesis.tex; do
+      if [[ -f "$cur/$n" ]]; then
+        candidates+=("$cur/${n%.*}.pdf")
+        break 2
+      fi
+    done
+    cur="$(dirname "$cur")"
+  done
+  for c in "${candidates[@]}"; do
+    [[ -f "$c" ]] && { pdf="$c"; break; }
+  done
+fi
+
+if [[ -z "$pdf" ]]; then
+  warn "no PDF found for $base"
+  exit 1
+fi
+
+# ---------- re-express the query in synctex's coordinates ----------------
+
+sync_file="$src"
+sync_line="$line"
+sync_col="$col"
+
+# Text-search fallback (typst): 1-based page number + the phrase that found it.
+search_page=""
+focus_text=""
+
+# First candidate phrase to appear in the rendered text fixes the page. Text is
+# extracted once — pdftotext dominates the cost. Whitespace is normalised both
+# sides: pdftotext breaks lines where the *typeset* line ended, not the source.
+typst_search_page() {
+  command -v pdftotext >/dev/null 2>&1 || return 1
+  command -v hxp-typtext >/dev/null 2>&1 || return 1
+
+  local txt cand page
+  txt="$(mktemp)" || return 1
+  if ! pdftotext -q "$pdf" - >"$txt" 2>/dev/null; then
+    rm -f -- "$txt"
+    return 1
+  fi
+
+  while IFS= read -r cand; do
+    [[ -z "$cand" ]] && continue
+    page="$(awk -v needle="$cand" '
+      BEGIN { RS = "\f"; n = 0 }
+      {
+        n++
+        t = $0
+        gsub(/[[:space:]]+/, " ", t)
+        if (index(t, needle) > 0) { print n; exit }
+      }
+    ' "$txt")"
+    if [[ -n "$page" ]]; then
+      rm -f -- "$txt"
+      printf '%s\t%s\n' "$page" "$cand"
+      return 0
+    fi
+  done < <(hxp-typtext "$src" "$line" 2>/dev/null | head -12)
+
+  rm -f -- "$txt"
+  return 1
+}
+
+case "$ext" in
+  md|markdown)
+    build_tex="$dir/.hxp_build_$stem/$stem.hxp.tex"
+    mapped=""
+    if [[ -f "$build_tex" ]] && command -v hxp-texline >/dev/null 2>&1; then
+      mapped="$(hxp-texline "$src" "$build_tex" "$line" 2>/dev/null)"
+    fi
+    if [[ -n "$mapped" ]]; then
+      sync_file="$build_tex"
+      sync_line="$mapped"
+      sync_col=1
+    else
+      # No latexmk build, or the line couldn't be located. Passing the md
+      # line on would be read as a tex line number and scroll arbitrarily.
+      sync_file=""
+    fi
+    ;;
+  typ|typst)
+    # No synctex at any typst version — locate the line's text on the page.
+    sync_file=""
+    if hit="$(typst_search_page)"; then
+      search_page="${hit%%$'\t'*}"
+      focus_text="${hit#*$'\t'}"
+    fi
+    ;;
+esac
+
+# ---------- viewer ------------------------------------------------------
+
+# The state file records what hxp launched. Sniffing the process list can't:
+# sioyek is single-instance (should_launch_new_instance 0), so its one command
+# line names only the first PDF opened and every later document fails to match.
+viewer="$state_viewer"
+[[ -z "$viewer" ]] && viewer="${HXP_VIEWER:-}"
+if [[ -z "$viewer" ]]; then
+  # grep -F, not a pgrep pattern: pgrep would read "+", "[", "(" in the path
+  # as regex operators and silently fail to match.
+  if pgrep -a zathura 2>/dev/null | grep -qF -- "$pdf"; then
+    viewer=zathura
+  elif pgrep -a sioyek 2>/dev/null | grep -qF -- "$pdf"; then
+    viewer=sioyek
+  elif command -v sioyek >/dev/null 2>&1; then
+    viewer=sioyek
+  elif command -v zathura >/dev/null 2>&1; then
+    viewer=zathura
+  fi
+fi
+
+if [[ -z "$viewer" ]] || ! command -v "$viewer" >/dev/null 2>&1; then
+  warn "no PDF viewer available"
+  exit 1
+fi
+
+# Focus the window showing this PDF, matching the basename in the title as hxp
+# does when tiling. hxp opens each document with --new-window in sioyek's shared
+# instance, so its "current" window is whichever session was touched last.
+raise_viewer_window() {
+  command -v wmctrl >/dev/null 2>&1 || return 1
+  local want="${pdf##*/}" id
+  id="$(wmctrl -l 2>/dev/null | awk -v b="$want" '
+    BEGIN { b = tolower(b) }
+    { if (index(tolower($0), b) > 0) { print $1; exit } }
+  ')"
+  [[ -n "$id" ]] || return 1
+  wmctrl -i -a "$id" >/dev/null 2>&1 || return 1
+  # Let the WM finish the switch before the viewer acts on it.
+  sleep 0.05
+  return 0
+}
+
+# zathura forwards only --synctex-forward to a running instance; --page/--find
+# would spawn a second window. Drive its D-Bus GotoPage instead, which is
+# 0-based (verified against the pagenumber property).
+zathura_goto_page() {
+  command -v gdbus >/dev/null 2>&1 || return 1
+  local names n fname
+  names="$(gdbus call --session --dest org.freedesktop.DBus \
+             --object-path /org/freedesktop/DBus \
+             --method org.freedesktop.DBus.ListNames 2>/dev/null \
+           | grep -o 'org\.pwmt\.zathura\.PID-[0-9]*' | sort -u)"
+  [[ -n "$names" ]] || return 1
+  while IFS= read -r n; do
+    [[ -z "$n" ]] && continue
+    fname="$(gdbus call --session --dest "$n" --object-path /org/pwmt/zathura \
+               --method org.freedesktop.DBus.Properties.Get \
+               org.pwmt.zathura filename 2>/dev/null)"
+    # Quoted inside the pattern: $pdf is a path, not a glob.
+    [[ "$fname" == *"$pdf"* ]] || continue
+    gdbus call --session --dest "$n" --object-path /org/pwmt/zathura \
+      --method org.pwmt.zathura.GotoPage "$(( $1 - 1 ))" >/dev/null 2>&1 && return 0
+  done <<< "$names"
+  return 1
+}
+
+raised=0
+raise_viewer_window && raised=1
+
+# Nothing to sync or search for: the raise was the whole job. Re-opening could
+# displace another session's document.
+if [[ -z "$sync_file" && -z "$search_page" ]]; then
+  (( raised )) && exit 0
+fi
+
+case "$viewer" in
+  sioyek)
+    # --reuse-window is safe only once the right window is focused; otherwise
+    # it takes over whichever is current, so open our own.
+    if (( raised )); then
+      win_flag=--reuse-window
+    else
+      win_flag=--new-window
+    fi
+    if [[ -n "$sync_file" ]]; then
+      # No --inverse-search: prefs_user.config already points at hxp-jump, and
+      # passing one downgrades reverse search to a bare `hx` instance-wide.
+      sioyek "$win_flag" \
+             --forward-search-file "$sync_file" \
+             --forward-search-line "$sync_line" \
+             --forward-search-column "$sync_col" \
+             "$pdf" >/dev/null 2>&1 &
+    elif [[ -n "$search_page" ]]; then
+      # --page is 1-based (verified); --focus-text marks the line within it.
+      sioyek "$win_flag" \
+             --page "$search_page" \
+             --focus-text "$focus_text" \
+             --focus-text-page "$search_page" \
+             "$pdf" >/dev/null 2>&1 &
+    else
+      sioyek "$win_flag" "$pdf" >/dev/null 2>&1 &
+    fi
+    disown
+    ;;
+  zathura|*)
+    # --synctex-forward reaches an existing instance over dbus, else spawns one.
+    if [[ -n "$sync_file" ]]; then
+      zathura --synctex-forward "$sync_line:$sync_col:$sync_file" "$pdf" >/dev/null 2>&1 &
+      disown
+    elif [[ -n "$search_page" ]] && zathura_goto_page "$search_page"; then
+      : # delivered over D-Bus to the running instance; no new process
+    else
+      zathura "$pdf" >/dev/null 2>&1 &
+      disown
+    fi
+    ;;
+esac
+
+exit 0

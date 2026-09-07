@@ -25,6 +25,7 @@ matrix, see [`README.md`](README.md).
   - [`hxp_errs`](#hxp_errs-file)
 - [The recommended tmux layout](#the-recommended-tmux-layout)
 - [Inverse search (PDF → editor)](#inverse-search-pdf--editor)
+- [Forward search (editor → PDF)](#forward-search-editor--pdf)
 - [Viewer keybindings](#viewer-keybindings)
 - [Per-language behavior](#per-language-behavior)
   - [Markdown](#markdown-md)
@@ -113,6 +114,7 @@ Print the dependency list without installing via `./install.sh --deps`.
 > **PATH matters.** The viewers launch `hxp-jump` (and it calls `hxp-mdline`)
 > *by bare name*. Make sure `~/.local/bin` is on `PATH` **before** the viewer
 > spawns, or inverse search silently falls back to opening a fresh editor.
+> `hxp-fwd` resolves `hxp-texline` the same way for forward search.
 
 ---
 
@@ -183,6 +185,14 @@ Inverse search (PDF -> editor)
   ✓ hxp-mdline   md <- tex line mapping
   ✓ tmux         in-place jumps when hxp runs in tmux
   ✓ xdotool      X11 keystroke fallback (no tmux)
+
+Forward search (editor -> PDF)
+  ✓ hxp-fwd      /home/you/.local/bin/hxp-fwd
+  ✓ hxp-texline  md -> tex line mapping
+  ✓ wmctrl       focuses the window showing this PDF
+  ✓ hxp-typtext  typ text-search phrases (no synctex)
+  ✓ pdftotext    locates the page for typ text search
+  ✓ gdbus        pages a running zathura for typ
 
 Window tiling
   ✓ session      XDG_SESSION_TYPE=x11
@@ -313,6 +323,80 @@ live.
 
 ---
 
+## Forward search (editor → PDF)
+
+The other direction: move the PDF to the line under your cursor in helix. Bind
+it in `~/.config/helix/config.toml` — hxp ships the shim, not the keybinding:
+
+```toml
+[keys.normal]
+"C-l" = ":sh ~/.local/bin/hxp-fwd '%{buffer_name}' %{cursor_line} %{cursor_column}"
+```
+
+`hxp-fwd` then:
+
+1. **Reads the session state file** for the PDF hxp is actually producing and
+   the viewer it launched. Both are recorded at launch precisely so this step
+   doesn't have to guess: sioyek runs a single shared instance whose command
+   line names only the first document ever opened, so sniffing the process list
+   identifies the wrong viewer — or none — for every later document. As with
+   inverse search, state from an exited session is skipped and reaped, and a
+   file with no state of its own (an `\input`'d chapter) matches any live
+   session in the same directory tree.
+2. **Re-expresses the query in synctex's coordinates.** This is the whole game
+   for Markdown: synctex records only pandoc's generated
+   `…/.hxp_build_<stem>/<stem>.hxp.tex`, never your `.md`, so a query naming the
+   `.md` matches nothing (`SyncTeX Warning: No tag for <file>.md`) and the
+   viewer silently fails to move. `hxp-texline` — the mirror of `hxp-mdline` —
+   maps the cursor line onto the intermediate first. `.tex` needs no
+   translation. `.typ` has no synctex at all — see the fallback below.
+3. **Focuses the window showing that PDF** (via `wmctrl`, matching on the
+   filename in the title, the same rule hxp uses when it tiles the viewer).
+   hxp opens each document with `--new-window` inside sioyek's shared instance,
+   so the instance's own notion of the "current" window belongs to whichever
+   session you touched last — without this step a forward search can scroll a
+   different document's window.
+4. **Issues the jump:** `--forward-search-*` for sioyek, `--synctex-forward`
+   for zathura (which reaches a running instance over dbus).
+
+### The typst fallback
+
+Typst emits no synctex — 0.15.x has no source-position output of any kind — so
+there is nothing to query and no way to do this exactly. Instead `hxp-fwd`
+looks for the cursor line's own **text** in the rendered page:
+
+1. `hxp-typtext` reduces the line to the prose that will actually be typeset.
+   Code, math, references and markup are cut out as *separators*, not joined
+   over: dropping `$E = m c^2$` from `We compute $E = m c^2$ and then refine`
+   leaves two separate runs, and their concatenation appears on no page. Each
+   surviving run is offered as a candidate, longest first, then nearby lines.
+   Lines that are purely code (`#let`, `#set`, `#import`, comments…) yield
+   nothing at all.
+2. `pdftotext` extracts the page text once, and the first candidate found fixes
+   the page.
+3. The viewer is moved there: sioyek gets `--page` (1-based) plus `--focus-text`
+   for a visual mark on the line; zathura is paged over D-Bus (`GotoPage`,
+   0-based). The D-Bus route matters — zathura only forwards
+   `--synctex-forward` to a running instance, so `--page` or `--find` would
+   open a *second* window on the same document.
+
+**This is an approximation, and page-level at best.** It only works for text
+that reaches the page verbatim, so ordinary prose, headings and captions are
+fine, while content produced by `#let` bindings, templates, `#show` rules, or
+math is not. Repeated text lands on its first occurrence. If `pdftotext` is
+missing, or nothing on or near the line renders as searchable text, forward
+search falls back to raising the window.
+
+When there's nothing to sync *and* nothing to search for — a Markdown line that
+can't be located in the intermediate, or typst text that never reaches the
+page — it raises the window and stops, rather than sending a Markdown line
+number to be read as a LaTeX one and scrolling somewhere arbitrary.
+
+`hxp --doctor`'s "Forward search" section reports whether `hxp-fwd`,
+`hxp-texline`, `hxp-typtext`, `wmctrl`, `pdftotext` and `gdbus` are live.
+
+---
+
 ## Viewer keybindings
 
 ### sioyek (custom additions)
@@ -377,10 +461,11 @@ latexmk <stem>.hxp.tex → PDF  (-synctex=1)      (xelatex ▸ lualatex ▸ pdfl
 ```
 
 The two-step path exists so **synctex survives** — that's what makes Markdown
-inverse search possible (synctex points at the `.hxp.tex`, and `hxp-mdline`
-maps the line back to your `.md`). Without `latexmk`, hxp falls back to
-`pandoc` compiling straight to PDF: still renders, but **no working inverse
-search**.
+search work in either direction. Synctex knows only the `.hxp.tex`, so both
+directions translate: `hxp-mdline` maps a tex line back to your `.md` for
+inverse search, and `hxp-texline` maps a `.md` line onto the tex for forward
+search. Without `latexmk`, hxp falls back to `pandoc` compiling straight to
+PDF: still renders, but **no working synctex in either direction**.
 
 - **Reader format:** `markdown+tex_math_single_backslash` (so `\(…\)` /
   `\[…\]` math works).
@@ -442,8 +527,10 @@ typst compile --root <root_dir> <root.typ> <pdf>    (one-shot / generic loop)
   package root), and uses `--root` so cross-file `#import`s resolve. The PDF
   lands next to the root.
 - **No synctex.** Typst doesn't emit synctex, so **inverse search isn't
-  available for `.typ`**. Everything else (live reload, error PDFs, the
-  `hxp_errs` readout) works.
+  available for `.typ`**, and forward search can only approximate: it finds the
+  cursor line's text in the rendered page and jumps to that page (see [the
+  typst fallback](#the-typst-fallback)). Everything else (live reload, error
+  PDFs, the `hxp_errs` readout) works.
 - **No LaTeX needed.** Typst error PDFs are rendered *with typst itself*, so
   `.typ` users don't need a LaTeX toolchain at all.
 
@@ -541,7 +628,7 @@ the rendered `.pdf`**, which is kept.
 | `<src-dir>/.<stem>.tmp.pdf` | Staging path before the atomic move to the real PDF. |
 | `<src-dir>/.hxp_build_<stem>/` | latexmk build tree (`.tex`; and Markdown's synctex intermediate `<stem>.hxp.tex`). |
 | `<pdf-dir>/<stem>.synctex.gz` | Synctex sidecar (kept only while viewing). |
-| `${XDG_RUNTIME_DIR:-/tmp}/hxp/<sha1>.state` | Per-source state file `hxp-jump` reads for inverse search. |
+| `${XDG_RUNTIME_DIR:-/tmp}/hxp/<sha1>.state` | Per-source state file: source, PDF, viewer, tmux pane, editor window id, pid. Read by `hxp-jump` (inverse search) and `hxp-fwd` (forward search). |
 
 The leading dots keep the scratch files out of `ls` and most file pickers. If a
 crash ever leaves them behind, they're safe to delete — the next `hxp` run

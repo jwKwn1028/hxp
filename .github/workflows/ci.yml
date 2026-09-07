@@ -22,12 +22,12 @@ jobs:
 
       - name: bash syntax check
         run: |
-          for f in bin/hxp-jump bin/hxp-mdline bin/hxp-dual-panelify install.sh; do
+          for f in bin/hxp-jump bin/hxp-mdline bin/hxp-fwd bin/hxp-texline bin/hxp-typtext bin/hxp-dual-panelify install.sh; do
             bash -n "$f"
           done
 
       - name: shellcheck
-        run: shellcheck -S warning bin/hxp-jump bin/hxp-mdline bin/hxp-dual-panelify install.sh
+        run: shellcheck -S warning bin/hxp-jump bin/hxp-mdline bin/hxp-fwd bin/hxp-texline bin/hxp-typtext bin/hxp-dual-panelify install.sh
 
       - name: parser tests (runs under gawk + mawk)
         run: zsh test/parse-test.zsh

@@ -33,6 +33,13 @@ leaving the editor.
   tex→pdf) so the synctex data persists and `hxp-jump` maps it back to
   the original markdown line. Falls back to spawning a fresh `hx` if no
   live pane is reachable.
+- Synctex **forward** search: press **Ctrl-l** in helix to move the PDF to
+  the line under your cursor (bind it yourself — see below). Works for
+  `.tex` and `.md`; markdown needs the line remapped onto pandoc's
+  intermediate `.hxp.tex` first, because that is the only file synctex
+  records. Typst emits no synctex at all, so it falls back to finding the
+  cursor line's text in the rendered page and jumping to that page —
+  approximate, and only for text that reaches the page verbatim.
 - CJK font auto-selection for Markdown PDFs (Korean / Japanese / Chinese
   glyphs render instead of disappearing). Override via `HXP_CJK_FONT`.
 - Sane Markdown page margins (`0.75in`, vs the ~1.85in LaTeX `article`
@@ -72,6 +79,9 @@ Then add this single line to `~/.zshrc`:
 | `bin/hxp-compile` | `~/.local/bin/hxp-compile` |
 | `bin/hxp-jump` | `~/.local/bin/hxp-jump` |
 | `bin/hxp-mdline` | `~/.local/bin/hxp-mdline` |
+| `bin/hxp-fwd` | `~/.local/bin/hxp-fwd` |
+| `bin/hxp-texline` | `~/.local/bin/hxp-texline` |
+| `bin/hxp-typtext` | `~/.local/bin/hxp-typtext` |
 | `bin/hxp-dual-panelify` | `~/.local/bin/hxp-dual-panelify` |
 | `config/zathura/zathurarc` | `~/.config/zathura/zathurarc` |
 | `config/sioyek/prefs_user.config` | `~/.config/sioyek/prefs_user.config` |
@@ -162,6 +172,9 @@ hxp/
 │   ├── hxp-compile        # watchexec-driven recompile wrapper
 │   ├── hxp-jump           # synctex inverse-search shim
 │   ├── hxp-mdline         # shared md<-tex line-mapping heuristic
+│   ├── hxp-fwd            # synctex forward-search shim (helix -> PDF)
+│   ├── hxp-texline        # shared md->tex line-mapping heuristic
+│   ├── hxp-typtext        # typ -> searchable page text (typst has no synctex)
 │   └── hxp-dual-panelify  # sioyek dual-panel wrapper (PATH-resolved)
 ├── config/
 │   ├── zathura/zathurarc
@@ -203,4 +216,4 @@ The session creates these next to your source file; all are swept on
 | `<src-dir>/.<stem>.tmp.pdf` | Stage path before atomic move to the real PDF. |
 | `<src-dir>/.hxp_build_<stem>/` | latexmk's build tree (tex; md with synctex intermediate). |
 | `<pdf-dir>/<stem>.synctex.gz` | Synctex sidecar (tex and md, while viewing). |
-| `${XDG_RUNTIME_DIR:-/tmp}/hxp/<sha1>.state` | hxp-jump's per-source state file. |
+| `${XDG_RUNTIME_DIR:-/tmp}/hxp/<sha1>.state` | Per-source state file (source, PDF, viewer, tmux pane, window id, pid) read by `hxp-jump` and `hxp-fwd`. |

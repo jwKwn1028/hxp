@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Extracts searchable phrases from a typst line, for hxp-fwd's text-search
+# fallback. Typst emits no synctex, so the only way to place a line in the PDF
+# is to find its text on the rendered page.
+#
+# Code, math and markup are cut out as *separators*, not joined over: removing
+# "$E = m c^2$" from "We compute $E = m c^2$ and then refine" leaves two runs,
+# and their concatenation is on no page.
+#
+# Prints one candidate per line, most specific first. The caller tries each
+# against the PDF, so an over-generous candidate costs time, never a wrong jump.
+#
+# Usage: hxp-typtext <typ-file> <line>
+
+set -u
+
+typ="${1:-}"
+typ_line="${2:-}"
+
+[[ -z "$typ_line" || ! -f "$typ" ]] && exit 0
+
+typ_total="$(awk 'END { print NR }' "$typ" 2>/dev/null)"
+[[ -z "$typ_total" || "$typ_total" -eq 0 ]] && exit 0
+
+# Cut the line into runs of typeset prose, one per output line. Code, math,
+# references and markup become breaks between runs.
+runs_for() {
+  sed -n "${1}p" "$typ" 2>/dev/null \
+    | sed -E '
+        s#//.*$#\n#
+        s#/\*.*\*/#\n#g
+        s/^[[:space:]]*=+[[:space:]]*//
+        s/^[[:space:]]*[-+][[:space:]]+//
+        s/^[[:space:]]*\/[[:space:]]+//
+        s/\$[^$]*\$/\n/g
+        s/`[^`]*`/\n/g
+        s/#[A-Za-z_][A-Za-z0-9_.-]*/\n/g
+        s/@[A-Za-z_][A-Za-z0-9_.-]*/\n/g
+        s/<[A-Za-z_][A-Za-z0-9_.-]*>/\n/g
+        s/[(){}]/\n/g
+        s/\[/\n/g
+        s/\]/\n/g
+        s/[*_]+/ /g
+      ' \
+    | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' \
+    | awk 'length($0) >= 5 && /[[:alnum:]]/ { print length($0), $0 }' \
+    | sort -rn -k1,1 \
+    | cut -d' ' -f2-
+}
+
+# Code lines render nothing — skip rather than search for an identifier.
+is_code_line() {
+  local raw
+  raw="$(sed -n "${1}p" "$typ" 2>/dev/null)"
+  case "${raw#"${raw%%[![:space:]]*}"}" in
+    '#let'*|'#import'*|'#include'*|'#set'*|'#show'*|'#{'*|'#('*|'//'*|'}'*|')'*) return 0 ;;
+  esac
+  return 1
+}
+
+emit_candidates() {
+  is_code_line "$1" && return 0
+
+  local run i
+  local -a words
+  while IFS= read -r run; do
+    [[ -z "$run" ]] && continue
+    read -r -a words <<< "$run"
+    (( ${#words[@]} == 0 )) && continue
+
+    for (( i = ${#words[@]}; i >= 2; i-- )); do
+      printf '%s\n' "${words[*]:0:i}"
+    done
+
+    # Lone words only if long enough to be distinctive: there is no monotonic
+    # anchor here, so a short common word would match anywhere.
+    printf '%s\n' "${words[@]}" \
+      | sed -E 's/[^[:alnum:]_.-]//g' \
+      | awk 'length($0) >= 8 { print $0 }'
+  done < <(runs_for "$1")
+}
+
+for off in 0 1 -1 2 -2 3 -3 4 -4; do
+  probe=$(( typ_line + off ))
+  (( probe < 1 || probe > typ_total )) && continue
+  emit_candidates "$probe"
+done
+
+exit 0

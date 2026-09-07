@@ -385,8 +385,12 @@ hxp() {
   # back to xprop _NET_ACTIVE_WINDOW for terminals that don't.
   local editor_wid; editor_wid="$(_hxp_editor_window_id)"
 
-  # State file for hxp-jump: lets PDF inverse-search drive the existing
-  # helix instance instead of spawning a fresh `hx` window.
+  # Resolved ahead of the launch so it can go in the state file: hxp-fwd needs
+  # it, and can't sniff it (one sioyek instance names only the first PDF).
+  local viewer; viewer="$(_hxp_viewer)"
+
+  # State file for hxp-jump and hxp-fwd: lets inverse search drive the existing
+  # helix instead of spawning `hx`, and forward search find this PDF + viewer.
   local state_dir="${XDG_RUNTIME_DIR:-/tmp}/hxp"
   mkdir -p -- "$state_dir" 2>/dev/null
   local state_key state_file
@@ -398,6 +402,7 @@ hxp() {
   {
     print -r -- "src=$src"
     print -r -- "pdf=$pdf"
+    print -r -- "viewer=$viewer"
     print -r -- "tmux=$TMUX"
     print -r -- "tmux_pane=$TMUX_PANE"
     print -r -- "windowid=$editor_wid"
@@ -416,7 +421,6 @@ hxp() {
     _hxp_wmctrl_tile :ACTIVE: left
   fi
 
-  local viewer; viewer="$(_hxp_viewer)"
   case "$viewer" in
     sioyek)
       sioyek --new-window "$pdf" >/dev/null 2>&1 &!
