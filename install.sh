@@ -15,9 +15,10 @@ Dependencies (install via your package manager):
 
   Required:
     zsh                  shell
-    helix (hx)           editor
     pandoc               markdown -> PDF pipeline
     inotify-tools        inotifywait, for the fallback watch loop
+    an editor            helix (hx) by default, or micro via `hxp --micro`
+                         / HXP_EDITOR=micro. Only the one you use is needed.
 
   Recommended:
     watchexec            kernel-level debouncing, smarter watch loop
@@ -29,7 +30,7 @@ Dependencies (install via your package manager):
                          forward search (both no-op on Wayland)
 
   Inverse search (PDF -> editor), optional:
-    tmux                 in-place jumps into a running helix pane
+    tmux                 in-place jumps into the running editor's pane
     xdotool              X11 keystroke fallback when not in tmux
 
   Forward search (editor -> PDF), optional:
@@ -86,6 +87,9 @@ link "$repo/bin/hxp-dual-panelify"        "$HOME/.local/bin/hxp-dual-panelify"
 link "$repo/config/zathura/zathurarc"     "$HOME/.config/zathura/zathurarc"
 link "$repo/config/sioyek/prefs_user.config" "$HOME/.config/sioyek/prefs_user.config"
 link "$repo/config/sioyek/keys_user.config" "$HOME/.config/sioyek/keys_user.config"
+# micro's half of forward search. helix can pass its cursor position to a shell
+# command from a keybinding; micro cannot, so the call comes from a plugin.
+link "$repo/config/micro/plug/hxpfwd"     "$HOME/.config/micro/plug/hxpfwd"
 
 cat <<'EOF'
 
@@ -98,10 +102,19 @@ Done. Final step (one-time):
   Verify ~/.local/bin is on PATH; if not, add it before zathura/sioyek
   spawn so synctex reverse-search can find hxp-jump.
 
-  For forward search (cursor -> PDF), bind a key in ~/.config/helix/config.toml:
+  For forward search (cursor -> PDF), bind a key in your editor. hxp ships
+  the shim, not the binding.
+
+  helix — ~/.config/helix/config.toml:
 
       [keys.normal]
       "C-l" = ":sh hxp-fwd '%{buffer_name}' %{cursor_line} %{cursor_column}"
+
+  micro — ~/.config/micro/bindings.json (the hxpfwd command comes from the
+  plugin linked above; this replaces micro's default `goto ` prefill on
+  Ctrl-l, which stays available as Ctrl-e goto):
+
+      "Ctrl-l": "command:hxpfwd"
 
 EOF
 

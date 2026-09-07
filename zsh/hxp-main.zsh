@@ -13,6 +13,8 @@
 # can source them without paying the cost of the whole .zshrc.
 #
 # Knobs (env vars):
+#   HXP_EDITOR           : force "helix" (default) or "micro"; `hxp --micro`
+#                          and `hxp --helix` set it for one invocation
 #   HXP_VIEWER           : force "sioyek" or "zathura"
 #   HXP_VIEWER_PID       : set internally; viewer's PID (used to send SIGHUP)
 #   HXP_NO_NATIVE_TYP=1  : disable `typst watch`, use generic compile loop
@@ -335,13 +337,34 @@ hxp() {
   setopt pipefail
   unsetopt monitor
 
-  if [[ "$1" == "--doctor" || "$1" == "doctor" ]]; then
+  # Exported (not just local) so everything hxp spawns — the viewer, and hence
+  # the hxp-jump / hxp-fwd shims it launches — agrees on the editor. The state
+  # file below is still the authority; sioyek's shared instance keeps only the
+  # environment of whichever session started it first.
+  local -x HXP_EDITOR="${HXP_EDITOR:-}"
+
+  while [[ "$1" == -* ]]; do
+    case "$1" in
+      --doctor)  _hxp_doctor; return 0 ;;
+      --micro)   HXP_EDITOR=micro; shift ;;
+      --helix)   HXP_EDITOR=helix; shift ;;
+      --)        shift; break ;;
+      *)         print -u2 "hxp: unknown option: $1"; return 2 ;;
+    esac
+  done
+
+  if [[ "$1" == "doctor" ]]; then
     _hxp_doctor
     return 0
   fi
 
+  local editor editor_bin
+  editor="$(_hxp_editor)"
+  editor_bin="$(_hxp_editor_bin "$editor")"
+  _hxp_need_cmd "$editor_bin" || { print -u2 "hxp: missing editor: $editor_bin"; return 2; }
+
   local src="$1"
-  [[ -z "$src" ]] && { print -u2 "usage: hxp <file.{md,tex,typ}>  |  hxp --doctor"; return 2; }
+  [[ -z "$src" ]] && { print -u2 "usage: hxp [--micro|--helix] <file.{md,tex,typ}>  |  hxp --doctor"; return 2; }
 
   if [[ ! -f "$src" ]]; then
     case "${${src:t}:e}" in
@@ -389,20 +412,17 @@ hxp() {
   # it, and can't sniff it (one sioyek instance names only the first PDF).
   local viewer; viewer="$(_hxp_viewer)"
 
-  # State file for hxp-jump and hxp-fwd: lets inverse search drive the existing
-  # helix instead of spawning `hx`, and forward search find this PDF + viewer.
-  local state_dir="${XDG_RUNTIME_DIR:-/tmp}/hxp"
-  mkdir -p -- "$state_dir" 2>/dev/null
-  local state_key state_file
-  # printf '%s' (no trailing newline) so the digest matches what hxp-jump
-  # computes from the synctex-supplied path. `print -r --` adds a newline
-  # and would silently break the lookup.
-  state_key="$(printf '%s' "$src" | sha1sum | cut -d' ' -f1)"
-  state_file="$state_dir/$state_key.state"
+  # State file for hxp-jump and hxp-fwd: lets inverse search drive the editor
+  # this session already opened instead of spawning a second one, and forward
+  # search find this PDF + viewer. `editor=` is what tells hxp-jump whether to
+  # type helix's `:open` or micro's command-bar `open` / `goto`.
+  local state_file; state_file="$(_hxp_state_file "$src")"
+  mkdir -p -- "${state_file:h}" 2>/dev/null
   {
     print -r -- "src=$src"
     print -r -- "pdf=$pdf"
     print -r -- "viewer=$viewer"
+    print -r -- "editor=$editor"
     print -r -- "tmux=$TMUX"
     print -r -- "tmux_pane=$TMUX_PANE"
     print -r -- "windowid=$editor_wid"
@@ -467,7 +487,8 @@ hxp() {
     # state file used by hxp-jump.
     rm -f -- "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_tex" "$synctex_gz" 2>/dev/null
     rm -rf -- "$build_dir" 2>/dev/null
-    [[ -n "$state_file" ]] && rm -f -- "$state_file" 2>/dev/null
+    # .buf is hxp-jump's note of which file it last drove micro to.
+    [[ -n "$state_file" ]] && rm -f -- "$state_file" "$state_file.buf" 2>/dev/null
   }
 
   trap 'cleanup; return 130' INT
@@ -482,12 +503,14 @@ hxp() {
     [[ -f "$synctex_tex" ]] && _dtex="$synctex_tex"
     [[ -z "$_dtex" && -f "$debug_tex" ]] && _dtex="$debug_tex"
     if [[ "$ext" == "md" && -n "$_dtex" ]]; then
-      hx "$src" "$err_log" "$_dtex"
+      _hxp_editor_open "$editor" "$src" "" "" "$err_log" "$_dtex"
     else
-      hx "$(_hxp_hx_target_for_error "$src" "$err_log")" "$err_log"
+      local _ef _el _ec
+      IFS=$'\t' read -r _ef _el _ec <<< "$(_hxp_error_pos_for "$src" "$err_log")"
+      _hxp_editor_open "$editor" "$_ef" "$_el" "$_ec" "$err_log"
     fi
   else
-    hx "$src"
+    _hxp_editor_open "$editor" "$src" "" ""
   fi
 
   cleanup

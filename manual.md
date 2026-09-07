@@ -1,15 +1,16 @@
 # hxp — User Manual
 
 A live-preview workflow for **Markdown**, **LaTeX**, and **Typst**. You edit
-in [helix] on the left, a PDF viewer auto-reloads on the right, and every save
-recompiles. Compile errors are turned into a PDF (and an optional side terminal
-readout) so you fix and re-save without leaving the editor. Click in the PDF to
-jump back to the source line.
+in [helix] — or [micro], via `hxp --micro` — on the left, a PDF viewer
+auto-reloads on the right, and every save recompiles. Compile errors are turned
+into a PDF (and an optional side terminal readout) so you fix and re-save
+without leaving the editor. Click in the PDF to jump back to the source line.
 
 This is the operational reference. For a project overview and the install
 matrix, see [`README.md`](README.md).
 
 [helix]: https://helix-editor.com
+[micro]: https://micro-editor.github.io
 
 ---
 
@@ -20,6 +21,7 @@ matrix, see [`README.md`](README.md).
 - [Install (recap)](#install-recap)
 - [Commands](#commands)
   - [`hxp`](#hxp-file)
+  - [Choosing the editor](#choosing-the-editor)
   - [`hxp --doctor`](#hxp---doctor)
   - [`wpdf`](#wpdf-file)
   - [`hxp_errs`](#hxp_errs-file)
@@ -48,8 +50,8 @@ when you quit the editor:
 
 ```
         ┌──────────────┐         save        ┌──────────────┐
-        │    helix     │ ──────────────────► │   watcher    │  (wpdf, backgrounded)
-        │  (your edit) │                     │  recompiles  │
+        │    editor    │ ──────────────────► │   watcher    │  (wpdf, backgrounded)
+        │ helix/micro  │                     │  recompiles  │
         └──────┬───────┘                     └──────┬───────┘
                │                                    │ writes <stem>.pdf
    F5 / Ctrl+click                                  ▼
@@ -59,18 +61,19 @@ when you quit the editor:
                                               └──────────────┘
 ```
 
-- **Editing** happens in helix; nothing special is required of you — just save.
+- **Editing** happens in helix, or in micro when you pass `--micro`; nothing
+  special is required of you — just save.
 - **Compiling** is done by a backgrounded watcher (`wpdf`) that fires on each
   save. Success replaces the PDF; failure renders an *error PDF* in its place.
 - **Viewing** is a standard PDF viewer ([sioyek] or [zathura]) that reloads the
   file itself whenever it changes on disk.
 - **Inverse search** closes the loop: clicking in the PDF (or pressing **F5**)
-  drives your *already-running* helix to the matching source line.
+  drives your *already-running* editor to the matching source line.
 
 [sioyek]: https://sioyek.info
 [zathura]: https://pwmt.org/projects/zathura/
 
-When you quit helix, `hxp` stops the watcher, closes the viewer window it
+When you quit the editor, `hxp` stops the watcher, closes the viewer window it
 opened, and sweeps its scratch files — **keeping only the finished `.pdf`**.
 
 ---
@@ -87,6 +90,9 @@ hxp paper.tex
 hxp slides.typ
 
 # If the file doesn't exist yet, hxp scaffolds a minimal starter for you.
+
+# 3. Same thing in micro instead of helix
+hxp --micro notes.md
 ```
 
 For inverse search and an errors-in-your-eyeline pane, launch inside **tmux**
@@ -97,7 +103,7 @@ For inverse search and an errors-in-your-eyeline pane, launch inside **tmux**
 ## Install (recap)
 
 ```sh
-git clone https://github.com/<you>/hxp.git ~/Applications/hxp
+git clone https://github.com/jwKwn1028/hxp.git ~/Applications/hxp
 ~/Applications/hxp/install.sh
 ```
 
@@ -107,9 +113,14 @@ Then add one line to `~/.zshrc` and reload your shell:
 [[ -r "$HOME/.zsh/hxp-main.zsh" ]] && source "$HOME/.zsh/hxp-main.zsh"
 ```
 
-`install.sh` symlinks the shell functions, the `bin/` helpers, and the viewer
-configs into place (re-runnable; backs up any real files it would replace).
-Print the dependency list without installing via `./install.sh --deps`.
+`install.sh` symlinks the shell functions, the `bin/` helpers, the viewer
+configs, and micro's forward-search plugin into place (re-runnable; backs up
+any real files it would replace). Print the dependency list without installing
+via `./install.sh --deps`.
+
+Only the editor you actually use has to be installed. Neither editor gets a
+keybinding from hxp — see [Forward search](#forward-search-editor--pdf) for the
+one line to add.
 
 > **PATH matters.** The viewers launch `hxp-jump` (and it calls `hxp-mdline`)
 > *by bare name*. Make sure `~/.local/bin` is on `PATH` **before** the viewer
@@ -128,7 +139,7 @@ diagnostic. All three accept `.md`, `.tex`, and `.typ`.
 The full workflow: editor **+** viewer **+** watcher, torn down together.
 
 ```
-usage: hxp <file.{md,tex,typ}>  |  hxp --doctor
+usage: hxp [--micro|--helix] <file.{md,tex,typ}>  |  hxp --doctor
 ```
 
 What it does, in order:
@@ -139,20 +150,54 @@ What it does, in order:
    and `.typ` the PDF lands next to the project root, *not* next to an included
    file you happened to open (see [Per-language behavior](#per-language-behavior)).
 3. Writes a **state file** under `$XDG_RUNTIME_DIR/hxp/` recording the source,
-   PDF, tmux pane, and editor window — this is what inverse search reads.
+   PDF, viewer, editor, tmux pane, and editor window — this is what inverse
+   search reads.
 4. Runs an **initial compile** so the viewer has something to show immediately.
 5. **Tiles** the editor terminal to the left half of the work area (floating
    WMs only — see [Window tiling](#window-tiling)).
 6. **Launches the viewer** on the right. For sioyek it opens a dedicated
    `--new-window` and auto-enables synctex mode so inverse search is armed.
-7. **Backgrounds the watcher** (`wpdf -q --no-initial`) and re-focuses helix.
-8. **Opens helix.** On a clean first compile it opens just your file. If the
-   first compile *failed*, it also opens the error log (and, for Markdown, the
-   generated `.tex`) as extra buffers so the diagnostics are right there.
+7. **Backgrounds the watcher** (`wpdf -q --no-initial`) and re-focuses the
+   editor terminal.
+8. **Opens the editor.** On a clean first compile it opens just your file. If
+   the first compile *failed*, it also opens the error log (and, for Markdown,
+   the generated `.tex`) as extra buffers so the diagnostics are right there —
+   extra views in helix, extra tabs in micro — with the cursor already on the
+   offending line where the compiler named one.
 
-When helix exits, `hxp` runs cleanup: stops the watcher, closes *its own*
+When the editor exits, `hxp` runs cleanup: stops the watcher, closes *its own*
 viewer window (via `wmctrl`, so concurrent sessions aren't disturbed), and
 sweeps scratch files while keeping the PDF.
+
+### Choosing the editor
+
+`hxp` runs [helix] by default and [micro] on request. Everything else in the
+session is identical — same compile pipeline, same viewer, same tiling, same
+cleanup, both directions of synctex search:
+
+```sh
+hxp --micro notes.md          # this session only
+export HXP_EDITOR=micro       # every session
+hxp --helix notes.md          # override the export for one call
+```
+
+The flag just sets `HXP_EDITOR` for the invocation. Anything other than
+`micro` means helix, and `hxp --doctor` says so out loud when the variable
+holds something it doesn't recognise. hxp checks the editor's binary before
+doing any work, so a missing `micro` is a one-line error rather than a
+compiled PDF with nothing to edit it in.
+
+Only two things actually differ, both because the editors take a cursor
+position in different shapes:
+
+| | helix | micro |
+|---|---|---|
+| Opening at a line | `hx file:line:col` | `micro +line:col file` |
+| Driving a *running* instance ([inverse search](#inverse-search-pdf--editor)) | `:open file:line:col` | `open file` then `goto line:col`, via the `Ctrl-e` command bar |
+| [Forward search](#forward-search-editor--pdf) | `:sh hxp-fwd …` from a keybinding | the shipped `hxpfwd` micro plugin |
+
+Both are 1-based in line *and* column, which is what synctex reports, so no
+translation happens anywhere in between.
 
 ### `hxp --doctor`
 
@@ -165,9 +210,9 @@ hxp doctor
 
 Required
   ✓ zsh          /usr/bin/zsh
-  ✓ hx           /usr/bin/hx
   ✓ pandoc       /usr/bin/pandoc
   ✓ inotifywait  /usr/bin/inotifywait
+  ✓ hx           active editor (helix) — /usr/bin/hx
 
 Compilers
   ✓ latexmk      tex + md two-step synctex
@@ -207,6 +252,10 @@ Extras
 
 Marker legend: **✓** present/active · **○** optional & absent (feature
 degraded, hxp still runs) · **✗** required & missing (fix this).
+
+The *Required* editor row follows `HXP_EDITOR`: run `hxp --doctor` with it set
+to `micro` and the row becomes `micro`, and a `hxpfwd.lua` row appears under
+*Forward search* reporting whether micro's plugin is installed.
 
 ### `wpdf <file>`
 
@@ -268,10 +317,12 @@ writes. It does not compile anything itself, so always pair it with a running
 
 ## The recommended tmux layout
 
-Inverse search lands *in your running helix* only when hxp can reach that
-helix. The most reliable way is to launch hxp inside **tmux**: `hxp-jump` then
-drives the exact pane via `tmux send-keys`. Outside tmux it falls back to
-`xdotool` keystrokes (X11 only), and failing that, spawns a fresh `hx`.
+Inverse search lands *in your running editor* only when hxp can reach it.
+Neither helix nor micro speaks an editor-server protocol, so the jump is
+delivered by typing at the editor. The most reliable way is to launch hxp
+inside **tmux**: `hxp-jump` then drives the exact pane via `tmux send-keys`.
+Outside tmux it falls back to `xdotool` keystrokes (X11 only), and failing
+that, spawns a fresh editor.
 
 A comfortable two-pane setup — editor+viewer on the left, error readout on the
 right:
@@ -310,7 +361,8 @@ Under the hood the viewer runs `hxp-jump <file>:<line>[:<col>]`, which:
    and reaped — its pane/window id may have been recycled, so trusting it could
    type the jump into an unrelated window.
 3. **Delivers the jump** by preference: `tmux send-keys` → `xdotool` keystrokes
-   to the editor's X11 window → spawning a fresh `hx` as last resort.
+   to the editor's X11 window → spawning a fresh editor as last resort. What
+   gets typed depends on the editor the state file names (see below).
 4. **Handles multi-file projects:** if the synctex-reported file has no exact
    state file (e.g. an `\input`'d chapter), it matches any live session whose
    source lives in the same directory tree.
@@ -321,19 +373,62 @@ needs `latexmk` — without it the Markdown path can't emit synctex at all (see
 below). `hxp --doctor`'s "Inverse search" section tells you which of these are
 live.
 
+### What gets typed
+
+**helix** takes it in one command: `Escape Escape`, then
+`:open <file>:<line>:<col>` and Enter.
+
+**micro** has no positional open — its `open` command takes a bare path and
+`goto` moves within the current buffer — so the jump is up to two command-bar
+round trips: `Ctrl-e` `open <file>` Enter, then `Ctrl-e` `goto <line>:<col>`
+Enter. Two details make that safe:
+
+- **The `open` is skipped when the file is already up.** micro's `open` builds
+  a fresh buffer and the old undo history goes with it, which would be a steep
+  price for a click that only needed to scroll. Nothing can be asked of micro
+  from outside, so `hxp-jump` keeps its own note — a one-line `<sha1>.state.buf`
+  beside the state file — of the last file it drove the session to, seeded with
+  the file `hxp` opened. A jump into an `\input`'d chapter and back therefore
+  opens twice and scrolls the rest of the time.
+- **The leading Escape gets its own beat.** micro's input layer waits ~50 ms
+  after a lone `ESC` to see whether an escape sequence follows; a key delivered
+  inside that window arrives as `Alt-<key>`, which is not the command bar — so
+  the `open …` text would land in your document instead. `hxp-jump` pauses
+  between the two.
+
+Paths are quoted the way `/bin/sh` would quote them, since that is how micro's
+command bar parses its arguments — spaces in filenames survive.
+
 ---
 
 ## Forward search (editor → PDF)
 
-The other direction: move the PDF to the line under your cursor in helix. Bind
-it in `~/.config/helix/config.toml` — hxp ships the shim, not the keybinding:
+The other direction: move the PDF to the line under your cursor. hxp ships the
+shim, not the keybinding — bind it yourself in whichever editor you use.
+
+**helix** — `~/.config/helix/config.toml`:
 
 ```toml
 [keys.normal]
 "C-l" = ":sh ~/.local/bin/hxp-fwd '%{buffer_name}' %{cursor_line} %{cursor_column}"
 ```
 
-`hxp-fwd` then:
+**micro** — `~/.config/micro/bindings.json`:
+
+```json
+"Ctrl-l": "command:hxpfwd"
+```
+
+micro keybindings can't interpolate the cursor position into a command, so the
+`hxpfwd` command comes from a small plugin `install.sh` links into
+`~/.config/micro/plug/hxpfwd/`. It reads the buffer's absolute path and cursor,
+converts micro's 0-based coordinates to synctex's 1-based ones, and runs
+`hxp-fwd` as a background job — not a blocking call, because the typst fallback
+below shells out to `pdftotext` over the whole document. Anything `hxp-fwd`
+prints comes back in micro's info bar. Note that this replaces micro's default
+`Ctrl-l` (`goto ` prefill); that command is still there as `Ctrl-e goto`.
+
+Either way `hxp-fwd` then:
 
 1. **Reads the session state file** for the PDF hxp is actually producing and
    the viewer it launched. Both are recorded at launch precisely so this step
@@ -407,7 +502,7 @@ left free.
 
 | Key | Action |
 |---|---|
-| `F5` | **Inverse search** at the cursor → jump to source in helix |
+| `F5` | **Inverse search** at the cursor → jump to source in the editor |
 | `i` | Toggle inverted / dark colors |
 | `a` | Fit page to window **width** |
 | `Ctrl-d` / `Ctrl-u` | Half-page down / up |
@@ -547,7 +642,8 @@ The error PDF leads with a red **"Compile failed"** banner (with an approximate
 error count when more than one), then:
 
 - **Look Here First** — the compiler's primary message, the resolved
-  `file:line:col` (as a clickable link), and a copy-paste **helix target**.
+  `file:line:col` (as a clickable link), and a copy-paste **editor target**
+  shaped for the editor the session is running (`hx file:line` / `micro +line file`).
 - **Suspect Line** — the exact source line the error points at.
 - **Nearby Source** — a few lines of context (for `.tex` / `.typ`).
 - **Compiler Extract** — a windowed slice of the raw log (capped so a cascading
@@ -570,6 +666,7 @@ Notes:
 
 | Variable | Effect |
 |---|---|
+| `HXP_EDITOR` | `helix` (default) or `micro`; anything else is treated as helix. `hxp --micro` / `hxp --helix` set it for one invocation. |
 | `HXP_VIEWER` | Force `sioyek` or `zathura` instead of auto-detect (sioyek preferred when both present). |
 | `HXP_CJK_FONT` | Override the CJK font family for Markdown PDFs. |
 | `HXP_MD_MARGIN` | Page margins for Markdown PDFs (default `0.75in`). Bare length = all sides; contains `=` → passed to `geometry` verbatim; empty = LaTeX class defaults. Frontmatter `geometry:` overrides it. |
@@ -600,12 +697,12 @@ echo "$XDG_SESSION_TYPE"   # x11 or wayland
   viewer launches, watcher recompiles, error PDFs render, inverse search works.
   You just place the windows yourself. `HXP_NO_TILE=1` skips it explicitly.
 - **Floating WMs** (xfwm, mutter-on-X11, kwin, openbox, …): `hxp` uses
-  `wmctrl -e` to put helix on the left half and the viewer on the right half of
-  the active monitor's work area.
+  `wmctrl -e` to put the editor on the left half and the viewer on the right
+  half of the active monitor's work area.
 - **Tiling WMs** (i3, sway, bspwm, dwm, awesome, xmonad, qtile, herbstluftwm,
   river, hyprland): geometry calls are **skipped** — managed containers ignore
-  `_NET_MOVERESIZE_WINDOW` anyway. The viewer opens while helix is focused and
-  the WM's own logic (e.g. [autotiling] on i3) splits it as a sibling.
+  `_NET_MOVERESIZE_WINDOW` anyway. The viewer opens while the editor is focused
+  and the WM's own logic (e.g. [autotiling] on i3) splits it as a sibling.
 
 Detection is automatic (`wmctrl -m`, falling back to `_NET_WM_NAME`). Override
 with `HXP_WM=tiling` or `HXP_WM=floating` if the guess is wrong.
@@ -628,7 +725,8 @@ the rendered `.pdf`**, which is kept.
 | `<src-dir>/.<stem>.tmp.pdf` | Staging path before the atomic move to the real PDF. |
 | `<src-dir>/.hxp_build_<stem>/` | latexmk build tree (`.tex`; and Markdown's synctex intermediate `<stem>.hxp.tex`). |
 | `<pdf-dir>/<stem>.synctex.gz` | Synctex sidecar (kept only while viewing). |
-| `${XDG_RUNTIME_DIR:-/tmp}/hxp/<sha1>.state` | Per-source state file: source, PDF, viewer, tmux pane, editor window id, pid. Read by `hxp-jump` (inverse search) and `hxp-fwd` (forward search). |
+| `${XDG_RUNTIME_DIR:-/tmp}/hxp/<sha1>.state` | Per-source state file: source, PDF, viewer, editor, tmux pane, editor window id, pid. Read by `hxp-jump` (inverse search) and `hxp-fwd` (forward search). |
+| `${XDG_RUNTIME_DIR:-/tmp}/hxp/<sha1>.state.buf` | micro only: the file `hxp-jump` last drove that session to, so a jump into a buffer already on screen scrolls instead of reopening. Written by `hxp-jump`, not by `hxp`. |
 
 The leading dots keep the scratch files out of `ls` and most file pickers. If a
 crash ever leaves them behind, they're safe to delete — the next `hxp` run
@@ -644,7 +742,7 @@ doctor names the exact feature each one gates.
 | Symptom | Likely cause & fix |
 |---|---|
 | PDF doesn't update on save | Watcher or viewer reload stalled. Confirm `inotify-tools` (and ideally `watchexec`) via doctor. On a network/odd filesystem, try `HXP_NO_WATCHEXEC=1`. |
-| Inverse search opens a *new* editor instead of jumping | hxp can't reach your helix. Launch hxp **inside tmux**, or install `xdotool` (X11). Also confirm `~/.local/bin` is on `PATH` *before* the viewer starts, so `hxp-jump` resolves. |
+| Inverse search opens a *new* editor instead of jumping | hxp can't reach the running one. Launch hxp **inside tmux**, or install `xdotool` (X11). Also confirm `~/.local/bin` is on `PATH` *before* the viewer starts, so `hxp-jump` resolves. |
 | Inverse search does nothing in a `.md` | Markdown synctex needs `latexmk`. Without it the Markdown path can't emit synctex. (`.typ` has no synctex at all — that's expected.) |
 | Windows don't tile | You're on Wayland, or missing `wmctrl`/`xprop`, or on a tiling WM (it defers to the WM). See [Window tiling](#window-tiling); override with `HXP_WM`. |
 | CJK glyphs missing in a Markdown PDF | Install `fonts-noto-cjk` or set `HXP_CJK_FONT="Your Font"`. Confirm the resolved font in doctor's *Extras* row. |
@@ -653,6 +751,9 @@ doctor names the exact feature each one gates.
 | Bibliography entries appear twice | Don't declare `bibliography:` in YAML *and* rely on a sibling `.bib` — pick one. With the YAML key present, hxp uses `--citeproc` alone. |
 | Typst errors seem silent | They shouldn't be — the error PDF + `hxp_errs` flip should fire. If you set `HXP_NO_NATIVE_TYP=1`, the generic loop is in play; either way errors surface. |
 | Wrong viewer launches | Set `HXP_VIEWER=sioyek` or `HXP_VIEWER=zathura`. |
+| `hxp --micro` still opens helix | The flag sets `HXP_EDITOR` for that call only, so check nothing later in the command line overrides it, and run `hxp --doctor` — its *Required* row names the active editor. |
+| `Ctrl-l` does nothing in micro | The binding isn't hxp's to add: put `"Ctrl-l": "command:hxpfwd"` in `~/.config/micro/bindings.json`. If it reports an unknown command, the plugin isn't linked — re-run `install.sh` and check doctor's `hxpfwd.lua` row. |
+| A jump into micro typed `open …` into the document | The command bar didn't open, so the text went to the buffer. Undo, and check that nothing is intercepting `Ctrl-e` (micro's `CommandMode`) — `Ctrl-e showkey Ctrl-e` reports what it's bound to. |
 | Second `hxp` hijacks the first's window | Shouldn't happen — sioyek sessions get `--new-window` and are matched by PDF basename. If it does, check you're not forcing single-window via a custom sioyek config. |
 | Scratch `.‹stem›.*` files left behind after a crash | Safe to delete; the next run recreates them. |
 
@@ -677,9 +778,13 @@ Both run on every push via `.github/workflows/ci.yml`.
 | `zsh/hxp-main.zsh` | `hxp()` / `wpdf()` entrypoints, window tiling, viewer launch. |
 | `zsh/hxp-lib.zsh` | Compile helpers, error rendering, `hxp_errs`, `--doctor`. Sourced by the watcher too. |
 | `bin/hxp-compile` | Thin per-save wrapper watchexec calls (avoids re-sourcing `.zshrc`). |
-| `bin/hxp-jump` | Synctex inverse-search shim (tmux / xdotool / fresh-hx). |
+| `bin/hxp-jump` | Synctex inverse-search shim (tmux / xdotool / fresh editor). |
 | `bin/hxp-mdline` | Shared md←tex line-mapping heuristic (used by jump *and* error renderer). |
+| `bin/hxp-fwd` | Synctex forward-search shim (editor → PDF), incl. the typst text fallback. |
+| `bin/hxp-texline` | Shared md→tex line-mapping heuristic (used by forward search). |
+| `bin/hxp-typtext` | Reduces a `.typ` line to searchable page text (typst has no synctex). |
 | `bin/hxp-dual-panelify` | PATH-resolved wrapper for sioyek's dual-panel extension. |
+| `config/micro/plug/hxpfwd/` | micro plugin exposing the `hxpfwd` command — micro keybindings can't pass the cursor position to a shell command. |
 
 ---
 
@@ -690,9 +795,12 @@ The installer only creates symlinks; remove them and the source line.
 ```sh
 rm -f ~/.zsh/hxp-main.zsh ~/.zsh/hxp-lib.zsh \
       ~/.local/bin/hxp-compile ~/.local/bin/hxp-jump \
-      ~/.local/bin/hxp-mdline ~/.local/bin/hxp-dual-panelify \
+      ~/.local/bin/hxp-mdline ~/.local/bin/hxp-fwd \
+      ~/.local/bin/hxp-texline ~/.local/bin/hxp-typtext \
+      ~/.local/bin/hxp-dual-panelify \
       ~/.config/zathura/zathurarc \
-      ~/.config/sioyek/prefs_user.config ~/.config/sioyek/keys_user.config
+      ~/.config/sioyek/prefs_user.config ~/.config/sioyek/keys_user.config \
+      ~/.config/micro/plug/hxpfwd
 ```
 
 Then delete the `source "$HOME/.zsh/hxp-main.zsh"` line from `~/.zshrc`. Any

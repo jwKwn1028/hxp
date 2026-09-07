@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install lint tools
-        run: sudo apt-get update && sudo apt-get install -y zsh shellcheck gawk mawk
+        run: sudo apt-get update && sudo apt-get install -y zsh shellcheck gawk mawk lua5.4
 
       - name: zsh syntax check
         run: |
@@ -28,6 +28,11 @@ jobs:
 
       - name: shellcheck
         run: shellcheck -S warning bin/hxp-jump bin/hxp-mdline bin/hxp-fwd bin/hxp-texline bin/hxp-typtext bin/hxp-dual-panelify install.sh
+
+      # micro loads this at startup; a syntax error there costs micro users
+      # forward search with no other signal than the command going missing.
+      - name: lua syntax check (micro plugin)
+        run: luac5.4 -p config/micro/plug/hxpfwd/hxpfwd.lua
 
       - name: parser tests (runs under gawk + mawk)
         run: zsh test/parse-test.zsh

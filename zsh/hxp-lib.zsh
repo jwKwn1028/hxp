@@ -22,6 +22,88 @@ _hxp_viewer() {
   fi
 }
 
+# ---------- editor selection ----------
+# Which editor hxp launches, and which one hxp-jump drives on a reverse-search
+# click. "helix" (the default) or "micro"; `hxp --micro` just exports
+# HXP_EDITOR for the session so every helper agrees with the running editor.
+# Anything unrecognised falls back to helix rather than trying to spawn it —
+# the argv shapes below are editor-specific, so an unknown name has no meaning.
+_hxp_editor() {
+  # ${...:-} first: hxp-lib is sourced into shells that may run with nounset.
+  [[ "${${HXP_EDITOR:-}:l}" == "micro" ]] && { print -r -- micro; return; }
+  print -r -- helix
+}
+
+_hxp_editor_bin() {
+  case "$1" in
+    micro) print -r -- micro ;;
+    *)     print -r -- hx ;;
+  esac
+}
+
+# argv for opening <file> at <line>[:<col>] plus any extra files, one word per
+# line. helix glues the position onto the path (file:line:col); micro takes it
+# as a separate leading `+line:col` (which then applies to every file it
+# opens). An empty <line> means "no position" for both. Split from
+# _hxp_editor_open so the argv shape is testable without spawning an editor.
+_hxp_editor_argv() {
+  emulate -L zsh
+  local editor="$1" file="$2" line="$3" col="$4"
+  shift 4
+
+  case "$editor" in
+    micro)
+      print -r -- micro
+      [[ -n "$line" ]] && print -r -- "+${line}${col:+:$col}"
+      print -r -- "$file"
+      ;;
+    *)
+      print -r -- hx
+      if [[ -n "$line" ]]; then
+        print -r -- "${file}:${line}${col:+:$col}"
+      else
+        print -r -- "$file"
+      fi
+      ;;
+  esac
+
+  local f
+  for f in "$@"; do print -r -- "$f"; done
+}
+
+_hxp_editor_open() {
+  emulate -L zsh
+  # Not `argv` — that name *is* the positional-parameter array in zsh, so
+  # declaring it local would empty "$@" before it reaches _hxp_editor_argv.
+  local -a cmd
+  cmd=( "${(@f)$(_hxp_editor_argv "$@")}" )
+  "${cmd[@]}"
+}
+
+# Path of the per-source state file hxp() writes and hxp-jump / hxp-fwd read.
+# printf '%s' (no trailing newline) so the digest matches what those bash
+# helpers compute from the synctex-supplied path.
+_hxp_state_file() {
+  emulate -L zsh
+  local key; key="$(printf '%s' "$1" | sha1sum | cut -d' ' -f1)"
+  print -r -- "${XDG_RUNTIME_DIR:-/tmp}/hxp/$key.state"
+}
+
+# The editor a live hxp session opened this source with, so an hxp_errs pane
+# started without HXP_EDITOR still prints the jump command that actually
+# applies. Falls back to the environment default when no session is running.
+_hxp_session_editor() {
+  emulate -L zsh
+  local sf k v
+  sf="$(_hxp_state_file "$1")"
+  if [[ -r "$sf" ]]; then
+    while IFS='=' read -r k v; do
+      [[ "$k" == "editor" && -n "$v" ]] && { print -r -- "$v"; return 0; }
+    done < "$sf"
+  fi
+  _hxp_editor
+}
+
 # Find the project-root source for tex/typ. Falls back to the file itself.
 _hxp_root_for() {
   local src="$1" ext="$2"
@@ -341,7 +423,10 @@ _hxp_error_location() {
   printf '%s\t%s\t%s\n' "$file" "$line" "$col"
 }
 
-_hxp_hx_target_for_error() {
+# file<TAB>line<TAB>col for the first error in the log, validated against the
+# filesystem: a location we cannot open — pandoc's already-swept temp .tex, say
+# — degrades to the source with no position rather than a bogus jump.
+_hxp_error_pos_for() {
   emulate -L zsh
   local src="$1" err_log="$2" loc file line col
 
@@ -349,10 +434,22 @@ _hxp_hx_target_for_error() {
   IFS=$'\t' read -r file line col <<< "$loc"
 
   if [[ -n "$line" && -f "$file" ]]; then
-    print -r -- "${file}:${line}${col:+:$col}"
+    printf '%s\t%s\t%s\n' "$file" "$line" "$col"
   else
-    print -r -- "$src"
+    printf '%s\t\t\n' "$src"
   fi
+}
+
+# The copy-pasteable "open the first error" command hxp_errs prints. Editor
+# shaped: `hx file:line:col` vs `micro +line:col file`.
+_hxp_editor_target_for_error() {
+  emulate -L zsh
+  local editor="$1" src="$2" err_log="$3" file line col
+  local -a cmd
+
+  IFS=$'\t' read -r file line col <<< "$(_hxp_error_pos_for "$src" "$err_log")"
+  cmd=( "${(@f)$(_hxp_editor_argv "$editor" "$file" "$line" "$col")}" )
+  print -r -- "${cmd[*]}"
 }
 
 _hxp_error_extract() {
@@ -452,7 +549,7 @@ _hxp_source_context() {
 
 _hxp_write_error_md() {
   local src="$1" ext="$2" err_log="$3" err_md="$4" debug_tex="$5"
-  local loc loc_file line col location extract primary source_line hx_target count count_label
+  local loc loc_file line col location extract primary source_line editor_cmd count count_label
   loc="$(_hxp_error_location "$err_log" "$src")"
   IFS=$'\t' read -r loc_file line col <<< "$loc"
   location="$loc_file"
@@ -461,7 +558,7 @@ _hxp_write_error_md() {
   extract="$(_hxp_error_extract "$err_log")"
   primary="$(_hxp_primary_error "$err_log")"
   source_line="$(_hxp_source_line "$loc_file" "$line")"
-  hx_target="$(_hxp_hx_target_for_error "$src" "$err_log")"
+  editor_cmd="$(_hxp_editor_target_for_error "$(_hxp_session_editor "$src")" "$src" "$err_log")"
   count="$(_hxp_error_count "$err_log")"
   if [[ "$count" -gt 1 ]]; then
     # Plain hyphen (not em-dash) so pdflatex-only setups still render this
@@ -498,7 +595,7 @@ _hxp_write_error_md() {
       echo "**File:** [\`$loc_file\`](file://$loc_file)"
     fi
     echo
-    echo "**Helix target:** \`$hx_target\`"
+    echo "**Editor target:** \`$editor_cmd\`"
     echo
 
     if [[ -n "$source_line" ]]; then
@@ -930,8 +1027,12 @@ _hxp_render_errs() {
     [[ -n "$source_line" ]] && printf '\n  %s|%s %s\n' "$C_DIM" "$C_RST" "$source_line"
   fi
 
-  local hx_target; hx_target="$(_hxp_hx_target_for_error "$src" "$err_log")"
-  printf '\n  %shx %s%s\n' "$C_DIM" "$hx_target" "$C_RST"
+  # The state file names the editor a live session actually opened this source
+  # with, so a side pane started without HXP_EDITOR still prints a usable
+  # command; _hxp_session_editor falls back to the environment default.
+  local cmd
+  cmd="$(_hxp_editor_target_for_error "$(_hxp_session_editor "$src")" "$src" "$err_log")"
+  printf '\n  %s%s%s\n' "$C_DIM" "$cmd" "$C_RST"
 }
 
 hxp_errs() {
@@ -991,16 +1092,29 @@ _hxp_doctor_row() {
 
 _hxp_doctor() {
   emulate -L zsh
-  local C_H=$'\033[1m' C_R=$'\033[0m' t viewer cjk
+  local C_H=$'\033[1m' C_R=$'\033[0m' t viewer cjk editor editor_bin
+
+  editor="$(_hxp_editor)"
+  editor_bin="$(_hxp_editor_bin "$editor")"
 
   print -r -- "${C_H}hxp doctor${C_R}"
   print
 
   print -r -- "${C_H}Required${C_R}"
-  for t in zsh hx pandoc inotifywait; do
+  for t in zsh pandoc inotifywait; do
     if _hxp_need_cmd "$t"; then _hxp_doctor_row "$t" ok "$(command -v "$t")"
     else _hxp_doctor_row "$t" miss "MISSING — required"; fi
   done
+  if _hxp_need_cmd "$editor_bin"; then
+    _hxp_doctor_row "$editor_bin" ok "active editor ($editor) — $(command -v "$editor_bin")"
+  else
+    _hxp_doctor_row "$editor_bin" miss "MISSING — the active editor ($editor)"
+  fi
+  # Only helix and micro have argv/keystroke shapes here; anything else in
+  # HXP_EDITOR is silently treated as helix, which is worth saying out loud.
+  if [[ -n "${HXP_EDITOR:-}" && "${${HXP_EDITOR:-}:l}" != (helix|hx|micro) ]]; then
+    _hxp_doctor_row HXP_EDITOR opt "\"$HXP_EDITOR\" unrecognised — using helix"
+  fi
 
   print
   print -r -- "${C_H}Compilers${C_R}"
@@ -1035,12 +1149,20 @@ _hxp_doctor() {
   if _hxp_need_cmd tmux; then _hxp_doctor_row tmux ok "in-place jumps when hxp runs in tmux"
   else _hxp_doctor_row tmux opt "absent — no tmux send-keys path"; fi
   if _hxp_need_cmd xdotool; then _hxp_doctor_row xdotool ok "X11 keystroke fallback (no tmux)"
-  else _hxp_doctor_row xdotool opt "absent — jumps spawn a fresh hx without tmux"; fi
+  else _hxp_doctor_row xdotool opt "absent — jumps spawn a fresh $editor_bin without tmux"; fi
 
   print
   print -r -- "${C_H}Forward search (editor -> PDF)${C_R}"
   if _hxp_need_cmd hxp-fwd; then _hxp_doctor_row hxp-fwd ok "$(command -v hxp-fwd)"
-  else _hxp_doctor_row hxp-fwd opt "not on PATH — bind C-l in helix to enable"; fi
+  else _hxp_doctor_row hxp-fwd opt "not on PATH — bind C-l in $editor to enable"; fi
+  # micro cannot interpolate the cursor into a keybinding, so its half of
+  # forward search is a plugin that calls hxp-fwd. Nothing to check for helix,
+  # whose `:sh` command passes the position directly.
+  if [[ "$editor" == "micro" ]]; then
+    local mplug="$HOME/.config/micro/plug/hxpfwd/hxpfwd.lua"
+    if [[ -e "$mplug" ]]; then _hxp_doctor_row hxpfwd.lua ok "micro plugin — bind \"command:hxpfwd\""
+    else _hxp_doctor_row hxpfwd.lua opt "absent — run install.sh; micro has no forward search without it"; fi
+  fi
   if _hxp_need_cmd hxp-texline; then _hxp_doctor_row hxp-texline ok "md -> tex line mapping"
   else _hxp_doctor_row hxp-texline opt "absent — md forward search raises the viewer only"; fi
   if _hxp_need_cmd wmctrl; then _hxp_doctor_row wmctrl ok "focuses the window showing this PDF"

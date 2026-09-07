@@ -72,7 +72,7 @@ pid_alive() {
 
 read_state "$state_file"
 if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
-  rm -f -- "$state_file" 2>/dev/null
+  rm -f -- "$state_file" "$state_file.buf" 2>/dev/null
   state_pdf=""; state_viewer=""
 fi
 
@@ -86,7 +86,7 @@ if [[ -z "$state_pdf" ]]; then
       state_pdf=""; state_viewer=""; continue
     fi
     if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
-      rm -f -- "$sf" 2>/dev/null
+      rm -f -- "$sf" "$sf.buf" 2>/dev/null
       state_pdf=""; state_viewer=""; continue
     fi
     sf_dir="$(dirname "$(realpath -m -- "$state_src" 2>/dev/null || printf '%s' "$state_src")")"

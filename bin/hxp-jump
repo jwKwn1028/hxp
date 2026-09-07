@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 # Synctex inverse-search shim. Wired into zathura's `synctex-editor-command`
 # and sioyek's `inverse_search_command` so clicking in the PDF jumps to
-# the source line. Helix has no editor-server protocol, so we drive the
-# existing helix instance via tmux send-keys (preferred) or xdotool
-# keystrokes to the terminal window (X11 fallback).
+# the source line. Neither helix nor micro has an editor-server protocol, so
+# we drive the running instance by typing at it: tmux send-keys (preferred)
+# or xdotool keystrokes to the terminal window (X11 fallback).
 #
 # Usage: hxp-jump <file>:<line>[:<col>]
 #
 # Strategy:
 #   1. If the synctex path is a .hxp.tex intermediate (pandoc-generated),
 #      map back to the original .md source and approximate the line.
-#   2. Locate the per-source state file written by hxp().
+#   2. Locate the per-source state file written by hxp(); it names the editor.
 #   3. If it records a tmux pane, send keys to that pane.
-#   4. Else if it records a window ID and xdotool is available, type
-#      the :open command into the helix terminal window (X11).
-#   5. Otherwise fall back to spawning a new hx instance.
+#   4. Else if it records a window ID and xdotool is available, type the same
+#      keys into the editor's terminal window (X11).
+#   5. Otherwise fall back to spawning a new editor instance.
+#
+# The keystrokes per editor:
+#   helix  Escape Escape, then `:open <file>:<line>:<col>` Enter.
+#   micro  Ctrl-e (command bar), then `open <file>` Enter — skipped when the
+#          session is already on that file, which spares micro's undo history
+#          — then Ctrl-e and `goto <line>:<col>` Enter. Both are 1-based.
 
 set -u
 
@@ -24,6 +30,39 @@ set -u
 guess_md_line() {
   command -v hxp-mdline >/dev/null 2>&1 || return 0
   hxp-mdline "$1" "$2" "$3"
+}
+
+# Which editor to drive. The state file read below is the authority — it
+# records what the running session actually opened — but the environment is
+# all we have before the target has been parsed into a path.
+editor="helix"
+[[ "${HXP_EDITOR:-}" == "micro" ]] && editor="micro"
+
+# Open <file> [line] [col] in a *new* editor, the last resort when no live
+# session can be reached. helix wants the position glued to the path; micro
+# wants it as a leading +line:col.
+spawn_editor() {
+  local file="$1" line="${2:-}" col="${3:-}"
+  case "$editor" in
+    micro)
+      if [[ -n "$line" ]]; then
+        exec micro "+${line}${col:+:$col}" "$file"
+      fi
+      exec micro "$file"
+      ;;
+    *)
+      if [[ -n "$line" ]]; then
+        exec hx "${file}:${line}${col:+:$col}"
+      fi
+      exec hx "$file"
+      ;;
+  esac
+}
+
+# micro's command bar parses its arguments the way /bin/sh does, so a path
+# with spaces has to reach it quoted.
+shquote() {
+  printf "'%s'" "${1//\'/\'\\\'\'}"
 }
 
 target="${1:-}"
@@ -42,7 +81,7 @@ elif [[ "$target" =~ ^(.+):([0-9]+)$ ]]; then
   col=""
 else
   # Couldn't parse — open the whole thing in a fresh editor.
-  exec hx "$target"
+  spawn_editor "$target"
 fi
 
 # Detect pandoc intermediate (.hxp.tex) and map back to the .md source.
@@ -94,6 +133,7 @@ read_state() {
   window_id=""
   state_pid=""
   state_src=""
+  state_editor=""
   [[ -r "$1" ]] || return 1
   while IFS='=' read -r k v; do
     case "$k" in
@@ -101,6 +141,7 @@ read_state() {
       tmux)      tmux_socket="$v" ;;
       tmux_pane) tmux_pane="$v" ;;
       windowid)  window_id="$v" ;;
+      editor)    state_editor="$v" ;;
       pid)       state_pid="$v" ;;
     esac
   done < "$1"
@@ -113,8 +154,8 @@ read_state "$state_file"
 # fallback runs instead of us trusting stale coordinates. Absent pid (older
 # state files) skips the check — behave as before.
 if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
-  rm -f -- "$state_file" 2>/dev/null || true
-  tmux_socket=""; tmux_pane=""; window_id=""
+  rm -f -- "$state_file" "$state_file.buf" 2>/dev/null || true
+  tmux_socket=""; tmux_pane=""; window_id=""; state_editor=""
 fi
 
 # Fallback: if no exact match, scan state files for one whose source is in
@@ -127,28 +168,91 @@ if [[ -z "$tmux_pane" && -z "$window_id" ]]; then
     [[ -r "$sf" && "$sf" != "$state_file" ]] || continue
     read_state "$sf"
     if [[ -z "$state_src" ]]; then
-      tmux_socket=""; tmux_pane=""; window_id=""; continue
+      tmux_socket=""; tmux_pane=""; window_id=""; state_editor=""; continue
     fi
     if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
-      rm -f -- "$sf" 2>/dev/null || true
-      tmux_socket=""; tmux_pane=""; window_id=""; continue
+      rm -f -- "$sf" "$sf.buf" 2>/dev/null || true
+      tmux_socket=""; tmux_pane=""; window_id=""; state_editor=""; continue
     fi
     sf_dir="$(dirname "$(realpath -m -- "$state_src" 2>/dev/null || printf '%s' "$state_src")")"
     case "$reported_dir" in
       "$sf_dir"|"$sf_dir"/*)
-        break ;;                        # keep this session's pane/window id
+        # Keep this session's pane/window id — and adopt its state file, so the
+        # buffer sidecar below is read and written for the session we drive.
+        state_file="$sf"
+        break ;;
     esac
-    tmux_socket=""; tmux_pane=""; window_id=""   # no match — reset, keep scanning
+    # no match — reset, keep scanning
+    tmux_socket=""; tmux_pane=""; window_id=""; state_editor=""
   done
 fi
+
+# A surviving state_editor came from a session we decided to trust, so it
+# outranks the environment: the click should reach the editor that is actually
+# holding the file, not whatever HXP_EDITOR the viewer happened to inherit.
+case "$state_editor" in
+  micro)    editor=micro ;;
+  helix|hx) editor=helix ;;
+esac
 
 target_str="$realfile:$line"
 [[ -n "$col" ]] && target_str="$target_str:$col"
 
+# Which file is the editor showing? micro's `open` replaces the current buffer
+# and discards its undo history, so it must be skipped when the file is already
+# up — but "already up" is not the same as "the file hxp was launched on": a
+# previous click into an \input'd chapter moved the buffer. Nothing can be asked
+# of micro from out here, so hxp-jump records what it last opened in a sidecar
+# next to the state file, seeded by the session's own source.
+buf_file="$state_file.buf"
+current_buf=""
+[[ -r "$buf_file" ]] && IFS= read -r current_buf < "$buf_file"
+[[ -z "$current_buf" ]] && current_buf="$state_src"
+
+need_open=1
+[[ -n "$current_buf" && "$current_buf" == "$realfile" ]] && need_open=0
+
+# Remember where the jump left the editor. Only micro needs this — helix's
+# `:open` carries the position, so it never has to know the current buffer.
+remember_buffer() {
+  [[ "$editor" == "micro" && -n "$state_src" ]] || return 0
+  printf '%s\n' "$realfile" >| "$buf_file" 2>/dev/null || true
+}
+
+# micro has no positional open: `open` takes a bare path and `goto` moves
+# within the current buffer, so the jump is up to two command-bar round trips.
+# A lone Escape leads, in case a prompt is already open, and gets its own beat:
+# micro's input layer waits ~50ms after ESC to see whether an escape sequence
+# follows, and a key delivered inside that window arrives as Alt-<key> — which
+# is not CommandMode, so everything after it would be typed into the buffer.
+ESC_SETTLE=0.1
+
 # Method 1: tmux send-keys (works across terminals, cross-session).
+tsend() { TMUX="$tmux_socket" tmux send-keys -t "$tmux_pane" "$@" 2>/dev/null; }
+
+drive_tmux() {
+  case "$editor" in
+    micro)
+      tsend Escape || return 1
+      sleep "$ESC_SETTLE"
+      if (( need_open )); then
+        tsend C-e || return 1
+        tsend "open $(shquote "$realfile")" Enter || return 1
+        sleep "$ESC_SETTLE"
+      fi
+      tsend C-e || return 1
+      tsend "goto $line${col:+:$col}" Enter || return 1
+      ;;
+    *)
+      tsend Escape Escape || return 1
+      tsend ":open $target_str" Enter || return 1
+      ;;
+  esac
+}
+
 if [[ -n "$tmux_pane" ]] && command -v tmux >/dev/null 2>&1; then
-  if TMUX="$tmux_socket" tmux send-keys -t "$tmux_pane" Escape Escape 2>/dev/null \
-     && TMUX="$tmux_socket" tmux send-keys -t "$tmux_pane" ":open $target_str" Enter 2>/dev/null; then
+  if drive_tmux; then
+    remember_buffer
     TMUX="$tmux_socket" tmux select-pane -t "$tmux_pane" >/dev/null 2>&1 || true
     exit 0
   fi
@@ -160,20 +264,39 @@ if [[ "$window_id" == 0x* ]]; then
   window_id=$(printf '%d' "$window_id" 2>/dev/null) || window_id=""
 fi
 if [[ -n "$window_id" ]] && command -v xdotool >/dev/null 2>&1; then
-  # Focus the helix terminal window.
+  # Focus the editor's terminal window.
   xdotool windowactivate --sync "$window_id" 2>/dev/null || true
   # Small delay for the window manager to complete the focus switch.
   sleep 0.05
-  # Escape twice to ensure normal mode, then type the :open command.
-  xdotool key --window "$window_id" Escape Escape 2>/dev/null
-  sleep 0.02
-  # xdotool type --clearmodifiers releases any modifier keys (Ctrl, Shift)
-  # the user might be holding from the right-click gesture, preventing
-  # mis-fires like Ctrl+: instead of :.
-  xdotool type --window "$window_id" --clearmodifiers --delay 0 ":open $target_str" 2>/dev/null \
-    && xdotool key --window "$window_id" Return 2>/dev/null \
-    && exit 0
+
+  xkey() { xdotool key --window "$window_id" "$@" 2>/dev/null; }
+  # --clearmodifiers releases any modifier keys (Ctrl, Shift) the user might be
+  # holding from the right-click gesture, preventing mis-fires like Ctrl+:
+  # instead of :.
+  xtype() { xdotool type --window "$window_id" --clearmodifiers --delay 0 "$1" 2>/dev/null; }
+
+  case "$editor" in
+    micro)
+      xkey Escape
+      sleep "$ESC_SETTLE"
+      if (( need_open )); then
+        xkey ctrl+e
+        sleep 0.02
+        xtype "open $(shquote "$realfile")" && xkey Return
+        sleep "$ESC_SETTLE"
+      fi
+      xkey ctrl+e
+      sleep 0.02
+      xtype "goto $line${col:+:$col}" && xkey Return && { remember_buffer; exit 0; }
+      ;;
+    *)
+      # Escape twice to ensure normal mode, then type the :open command.
+      xkey Escape Escape
+      sleep 0.02
+      xtype ":open $target_str" && xkey Return && exit 0
+      ;;
+  esac
 fi
 
-# Fallback: no live helix we can reach — open a fresh one.
-exec hx "$target_str"
+# Fallback: no live editor we can reach — open a fresh one.
+spawn_editor "$realfile" "$line" "$col"
