@@ -33,7 +33,7 @@ trap 'rm -rf -- "$work"' EXIT
 compile() {  # src ext
   local src="$1" ext="$2" dir="${1:h}" stem="${${1:t}:r}"
   _hxp_compile_once "$src" "$ext" "$dir" "$stem" \
-    "$dir/$stem.pdf" "$dir/.${stem}.tmp.pdf" "$dir/.${stem}.error.log" \
+    "$(_hxp_pdf_for "$src" "$ext")" "$dir/.${stem}.tmp.pdf" "$dir/.${stem}.error.log" \
     "$dir/.${stem}.error.md" "$dir/.${stem}.debug.tex" "$dir/.hxp_build_${stem}"
 }
 
@@ -67,6 +67,16 @@ if _hxp_need_cmd latexmk; then
   compile "$d/a.tex" tex; rc=$?
   check "tex bad rc"        1 "$rc"
   check "tex bad error pdf" 1 "$(is_pdf "$d/a.pdf" && echo 1 || echo 0)"
+
+  # Launch on an included source from outside the project. latexmk must run
+  # at the root so relative inputs resolve; the output still belongs there.
+  d="$work/tex project"; mkdir -p "$d/chapters"
+  print -rl -- '\documentclass{article}' '\begin{document}' '\input{chapters/intro}' '\end{document}' >| "$d/main.tex"
+  print -r -- 'Included chapter.' >| "$d/chapters/intro.tex"
+  (cd "$work"; compile "$d/chapters/intro.tex" tex); rc=$?
+  check "tex included source from outside project" 0 "$rc"
+  check "tex included source root pdf" 1 "$(is_pdf "$d/main.pdf" && echo 1 || echo 0)"
+  check "tex no stray chapter pdf" 0 "$([[ -e "$d/chapters/intro.pdf" ]] && echo 1 || echo 0)"
 else
   skips+=(latex)
 fi
@@ -84,6 +94,14 @@ if _hxp_need_cmd typst; then
   compile "$d/a.typ" typ; rc=$?
   check "typ bad rc"        1 "$rc"
   check "typ bad error pdf" 1 "$(is_pdf "$d/a.pdf" && echo 1 || echo 0)"
+
+  d="$work/typ project"; mkdir -p "$d/chapters"
+  print -rl -- '= Root' '#include "chapters/intro.typ"' >| "$d/main.typ"
+  print -r -- 'Included chapter.' >| "$d/chapters/intro.typ"
+  compile "$d/chapters/intro.typ" typ; rc=$?
+  check "typ included source rc" 0 "$rc"
+  check "typ included source root pdf" 1 "$(is_pdf "$d/main.pdf" && echo 1 || echo 0)"
+  check "typ no stray chapter pdf" 0 "$([[ -e "$d/chapters/intro.pdf" ]] && echo 1 || echo 0)"
 
   # ----- typst `watch` render loop, fed a canned 0.15 transcript -----
   print -r -- "  [typst watch loop]"

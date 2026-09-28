@@ -157,6 +157,9 @@ What it does, in order:
    WMs only — see [Window tiling](#window-tiling)).
 6. **Launches the viewer** on the right. For sioyek it opens a dedicated
    `--new-window` and auto-enables synctex mode so inverse search is armed.
+   It records the newly created window's ID for tiling, forward search, and
+   cleanup, including when two projects both produce `main.pdf`.
+   Viewer startup is serialized so simultaneous sessions claim separate windows.
 7. **Backgrounds the watcher** (`wpdf -q --no-initial`) and re-focuses the
    editor terminal.
 8. **Opens the editor.** On a clean first compile it opens just your file. If
@@ -167,7 +170,9 @@ What it does, in order:
 
 When the editor exits, `hxp` runs cleanup: stops the watcher, closes *its own*
 viewer window (via `wmctrl`, so concurrent sessions aren't disturbed), and
-sweeps scratch files while keeping the PDF.
+sweeps scratch files while keeping the PDF. If its window cannot be identified
+or closed, Sioyek is left open: killing the shared process would close other
+sessions too. Zathura can still be stopped by its dedicated process ID.
 
 ### Choosing the editor
 
@@ -445,8 +450,9 @@ Either way `hxp-fwd` then:
    viewer silently fails to move. `hxp-texline` — the mirror of `hxp-mdline` —
    maps the cursor line onto the intermediate first. `.tex` needs no
    translation. `.typ` has no synctex at all — see the fallback below.
-3. **Focuses the window showing that PDF** (via `wmctrl`, matching on the
-   filename in the title, the same rule hxp uses when it tiles the viewer).
+3. **Focuses the window showing that PDF** via the window ID recorded at launch.
+   Older sessions without a recorded ID may use a unique viewer/title match;
+   ambiguous matches and vanished recorded windows are never reused.
    hxp opens each document with `--new-window` inside sioyek's shared instance,
    so the instance's own notion of the "current" window belongs to whichever
    session you touched last — without this step a forward search can scroll a
@@ -600,6 +606,8 @@ latexmk -pdf -synctex=1 <root.tex>   (pdflatex; -bibtex if a sibling .bib exists
   `root.tex`, or `thesis.tex` that has a `\documentclass`, and compiles that —
   so you can open and edit an `\input`'d chapter and still get the whole
   document's PDF. The PDF and synctex sidecar live next to the root.
+- **Working directory.** Compilation runs from the root source's directory,
+  so relative `\input` paths work even when hxp was launched elsewhere.
 - **Live on any project file.** The watch covers the root's whole directory
   tree, so saving *any* `\input`/`\include`'d chapter (or a `.sty`/`.cls`)
   rebuilds the PDF — not just the file you opened with `hxp`.
@@ -695,7 +703,9 @@ echo "$XDG_SESSION_TYPE"   # x11 or wayland
 
 - **Wayland / no wmctrl:** the tiling code silently no-ops. `hxp` still works —
   viewer launches, watcher recompiles, error PDFs render, inverse search works.
-  You just place the windows yourself. `HXP_NO_TILE=1` skips it explicitly.
+  You place the windows yourself and close shared Sioyek windows manually.
+  `HXP_NO_TILE=1` skips placement but still records window ownership when
+  `wmctrl` is available.
 - **Floating WMs** (xfwm, mutter-on-X11, kwin, openbox, …): `hxp` uses
   `wmctrl -e` to put the editor on the left half and the viewer on the right
   half of the active monitor's work area.
@@ -713,8 +723,9 @@ with `HXP_WM=tiling` or `HXP_WM=floating` if the guess is wrong.
 
 ## Runtime & output files
 
-Created next to your source during a session. **All are swept on exit except
-the rendered `.pdf`**, which is kept.
+Build artifacts live next to the source, while the PDF lives next to the
+project root and session state lives in the runtime directory. Temporary
+artifacts are swept on exit; the rendered PDF and shared launch-lock file remain.
 
 | Path | Role |
 |---|---|
@@ -725,8 +736,9 @@ the rendered `.pdf`**, which is kept.
 | `<src-dir>/.<stem>.tmp.pdf` | Staging path before the atomic move to the real PDF. |
 | `<src-dir>/.hxp_build_<stem>/` | latexmk build tree (`.tex`; and Markdown's synctex intermediate `<stem>.hxp.tex`). |
 | `<pdf-dir>/<stem>.synctex.gz` | Synctex sidecar (kept only while viewing). |
-| `${XDG_RUNTIME_DIR:-/tmp}/hxp/<sha1>.state` | Per-source state file: source, PDF, viewer, editor, tmux pane, editor window id, pid. Read by `hxp-jump` (inverse search) and `hxp-fwd` (forward search). |
+| `${XDG_RUNTIME_DIR:-/tmp}/hxp/<sha1>.state` | Per-source state file: source, PDF, viewer, editor, tmux pane, editor window id, viewer window id, pid. Read by `hxp-jump` (inverse search) and `hxp-fwd` (forward search). |
 | `${XDG_RUNTIME_DIR:-/tmp}/hxp/<sha1>.state.buf` | micro only: the file `hxp-jump` last drove that session to, so a jump into a buffer already on screen scrolls instead of reopening. Written by `hxp-jump`, not by `hxp`. |
+| `${XDG_RUNTIME_DIR:-/tmp}/hxp/viewer-launch.lock` | Persistent empty lock file for coordinating viewer startup; the lock is released after window identification. |
 
 The leading dots keep the scratch files out of `ls` and most file pickers. If a
 crash ever leaves them behind, they're safe to delete — the next `hxp` run
@@ -754,7 +766,7 @@ doctor names the exact feature each one gates.
 | `hxp --micro` still opens helix | The flag sets `HXP_EDITOR` for that call only, so check nothing later in the command line overrides it, and run `hxp --doctor` — its *Required* row names the active editor. |
 | `Ctrl-l` does nothing in micro | The binding isn't hxp's to add: put `"Ctrl-l": "command:hxpfwd"` in `~/.config/micro/bindings.json`. If it reports an unknown command, the plugin isn't linked — re-run `install.sh` and check doctor's `hxpfwd.lua` row. |
 | A jump into micro typed `open …` into the document | The command bar didn't open, so the text went to the buffer. Undo, and check that nothing is intercepting `Ctrl-e` (micro's `CommandMode`) — `Ctrl-e showkey Ctrl-e` reports what it's bound to. |
-| Second `hxp` hijacks the first's window | Shouldn't happen — sioyek sessions get `--new-window` and are matched by PDF basename. If it does, check you're not forcing single-window via a custom sioyek config. |
+| Second `hxp` hijacks the first's window | Sioyek sessions get `--new-window` and record the new window ID. Check you're not forcing single-window via a custom sioyek config. Ambiguous or unavailable window IDs disable window reuse. |
 | Scratch `.‹stem›.*` files left behind after a crash | Safe to delete; the next run recreates them. |
 
 ---
@@ -763,13 +775,16 @@ doctor names the exact feature each one gates.
 
 ```sh
 zsh test/parse-test.zsh   # compiler-log parsers — needs no compilers (fast gate)
+zsh test/workflow-test.zsh # watcher paths, scaffolding, and viewer ownership
 zsh test/smoke.zsh        # real compile per language (+ typst watch); skips absent tools
 ```
 
 `parse-test.zsh` runs in CI under both gawk and mawk to keep the awk log
 parsers POSIX-clean. `smoke.zsh` exercises the real pipeline and skips any
 language whose tools aren't installed, so it's useful with a partial toolchain.
-Both run on every push via `.github/workflows/ci.yml`.
+`workflow-test.zsh` tests sessions with mock watchers and viewers, including
+included-file output paths and concurrent windows with identical PDF names.
+All three run on every push via `.github/workflows/ci.yml`.
 
 **Source map** (see [`README.md`](README.md#layout) for the full tree):
 

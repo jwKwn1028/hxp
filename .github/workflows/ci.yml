@@ -37,6 +37,9 @@ jobs:
       - name: parser tests (runs under gawk + mawk)
         run: zsh test/parse-test.zsh
 
+      - name: workflow regressions (mock viewers and watchers)
+        run: zsh test/workflow-test.zsh
+
   smoke:
     runs-on: ubuntu-latest
     steps:

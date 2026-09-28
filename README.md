@@ -62,8 +62,10 @@ hxp_errs paper.tex       # live error readout, for a second tmux pane
 hxp --doctor             # what's installed, and what each missing tool costs
 ```
 
-Quitting the editor tears the session down: watcher stopped, viewer window
-closed, scratch files swept — **keeping only the finished `.pdf`**.
+Quitting the editor stops the watcher, closes its recorded viewer window, and
+sweeps scratch files — **keeping only the finished `.pdf`**. If `wmctrl` cannot
+identify Sioyek's window, it stays open so other sessions sharing its process
+aren't closed.
 
 Run it inside **tmux** if you want inverse search to land in the editor you
 already have open. See [the recommended layout](manual.md#the-recommended-tmux-layout).
@@ -102,6 +104,7 @@ hxp/
 │   └── micro/plug/hxpfwd/ # forward-search command for micro
 └── test/
     ├── parse-test.zsh     # toolchain-free: log parsers, editor dispatch
+    ├── workflow-test.zsh  # toolchain-free: watcher paths, viewer ownership
     └── smoke.zsh          # real compile per language
 ```
 
@@ -112,7 +115,8 @@ hxp/
 
 ```sh
 zsh test/parse-test.zsh   # fast gate — needs no compilers, runs under every awk
+zsh test/workflow-test.zsh # session regressions with mock watchers and viewers
 zsh test/smoke.zsh        # real pipeline; skips languages whose tools are absent
 ```
 
-Both run on every push via `.github/workflows/ci.yml`.
+All three run on every push via `.github/workflows/ci.yml`.

@@ -140,14 +140,22 @@ _hxp_root_for() {
   esac
 }
 
+# The viewer, watcher, and error pane must agree on the root document's PDF
+# even when the editor was opened on an included source in another directory.
+_hxp_pdf_for() {
+  emulate -L zsh
+  local root_src; root_src="$(_hxp_root_for "$1" "$2")"
+  print -r -- "${root_src:r}.pdf"
+}
+
 # Write a minimal starter file based on the extension. Used by hxp() when
 # the user passes a path that doesn't exist yet (nano/vim-style "editor
 # creates the file" UX).
 _hxp_scaffold() {
-  local path="$1"
-  local stem="${${path:t}:r}"
-  local ext="${${path:t}:e}"
-  local dir="${path:h}"
+  local src="$1"
+  local stem="${${src:t}:r}"
+  local ext="${${src:t}:e}"
+  local dir="${src:h}"
 
   [[ -d "$dir" ]] || mkdir -p -- "$dir" || return 1
 
@@ -157,7 +165,7 @@ _hxp_scaffold() {
         print -r -- "# ${stem}"
         print
         print
-      } >| "$path"
+      } >| "$src"
       ;;
     tex)
       {
@@ -175,7 +183,7 @@ _hxp_scaffold() {
         print -r -- ''
         print -r -- ''
         print -r -- '\end{document}'
-      } >| "$path"
+      } >| "$src"
       ;;
     typ)
       {
@@ -184,10 +192,10 @@ _hxp_scaffold() {
         print -r -- ''
         print -r -- "= ${stem}"
         print -r -- ''
-      } >| "$path"
+      } >| "$src"
       ;;
     *)
-      : >| "$path"
+      : >| "$src"
       ;;
   esac
 }
@@ -939,11 +947,14 @@ _hxp_compile_once() {
       mkdir -p -- "$build_dir"
       local -a bib_args
       [[ -n "$bib" ]] && bib_args=( -bibtex )
-      if latexmk -pdf -synctex=1 -interaction=nonstopmode -halt-on-error \
+      if (
+        cd -- "$root_dir" &&
+        latexmk -pdf -synctex=1 -interaction=nonstopmode -halt-on-error \
           -file-line-error \
           "${bib_args[@]}" \
           -outdir="$build_dir" -auxdir="$build_dir" \
-          "$root_src" >"$err_log" 2>&1; then
+          "$root_src" >"$err_log" 2>&1
+      ); then
         if [[ -f "$build_dir/$root_stem.pdf" ]]; then
           mv -f -- "$build_dir/$root_stem.pdf" "$temp_pdf"
           if [[ -f "$build_dir/$root_stem.synctex.gz" ]]; then
@@ -1049,7 +1060,7 @@ hxp_errs() {
   local stem="${${src:t}:r}"
   local err_log="$dir/.${stem}.error.log"
   local err_md="$dir/.${stem}.error.md"
-  local pdf="$dir/$stem.pdf"
+  local pdf; pdf="$(_hxp_pdf_for "$src" "${src:e}")"
 
   _hxp_render_errs "$err_log" "$err_md" "$src"
 

@@ -128,61 +128,65 @@ _hxp_find_viewer_window() {
   emulate -L zsh
   command -v wmctrl >/dev/null 2>&1 || return 1
 
-  local viewer="${1:l}" pid="$2" pdf="$3" base="${${pdf:t}:l}"
+  local viewer="${1:l}" pid="$2" pdf="$3" before="$4"
+  local base="${${pdf:t}:l}"
   local id
 
-  if [[ -n "$pid" ]]; then
-    # Require the PDF basename in the title too — sioyek's shared instance
-    # may own several windows on different workspaces; last-wins on PID
-    # alone would return whichever was opened most recently.
-    id="$(wmctrl -lp 2>/dev/null | awk -v pid="$pid" -v base="$base" '
-      BEGIN { base=tolower(base) }
-      $3 == pid {
-        line=tolower($0)
-        if (base == "" || index(line, base) > 0) id=$1
-      }
-      END { if (id != "") print id }
-    ')"
-    [[ -n "$id" ]] && { print -r -- "$id"; return 0; }
-  fi
-
-  # Require the PDF basename in the title so concurrent hxp sessions don't
-  # collide — a bare class match would pick *any* sioyek window when several
-  # share one instance via --new-window.
-  id="$(wmctrl -lx 2>/dev/null | awk -v viewer="$viewer" -v base="$base" '
-    BEGIN { viewer=tolower(viewer); base=tolower(base) }
-    {
-      line=tolower($0)
-      cls=tolower($3)
-      if (base != "" && index(line, base) > 0) id=$1
-      else if (base == "" && cls ~ viewer) id=$1
+  # Only consider windows created after our launch snapshot. Sioyek's shared
+  # process can own multiple main.pdf windows; neither PID nor title identifies
+  # a session. If simultaneous launches are ambiguous, do not claim a window.
+  id="$(wmctrl -lpx 2>/dev/null | awk -v viewer="$viewer" -v pid="$pid" \
+      -v base="$base" -v before="$before" '
+    BEGIN {
+      n=split(before, ids, "\n")
+      for (i=1; i<=n; i++) old[tolower(ids[i])]=1
     }
-    END { if (id != "") print id }
+    {
+      if (old[tolower($1)] || index(tolower($4), viewer) == 0) next
+      title=""
+      for (i=6; i<=NF; i++) title=title " " $i
+      if (index(tolower(title), base) == 0) next
+      count++; id=$1
+      if ($3 == pid) { pid_count++; pid_id=$1 }
+    }
+    END {
+      if (pid_count == 1) print pid_id
+      else if (count == 1) print id
+    }
   ')"
   [[ -n "$id" ]] || return 1
   print -r -- "$id"
 }
 
-_hxp_tile_viewer_when_ready() {
+_hxp_wait_for_viewer_window() {
   emulate -L zsh
-  [[ "$HXP_NO_TILE" == "1" ]] && return 0
-  # Tiling WM: skip the polling loop — autotiling already placed the viewer
-  # as a sibling split of the focused editor terminal.
-  [[ "$(_hxp_wm_kind)" == "tiling" ]] && return 0
+  command -v wmctrl >/dev/null 2>&1 || return 1
 
-  local -a wa
-  wa=( $(_hxp_wmctrl_workarea) )
-  (( ${#wa[@]} == 4 )) || return 0
-
-  local viewer="$1" pid="$2" pdf="$3" id i
+  # Window ownership is needed for cleanup/search even when tiling is disabled.
+  local viewer="$1" pid="$2" pdf="$3" before="$4" id i
   for i in {1..40}; do
-    id="$(_hxp_find_viewer_window "$viewer" "$pid" "$pdf")"
+    id="$(_hxp_find_viewer_window "$viewer" "$pid" "$pdf" "$before")"
     if [[ -n "$id" ]]; then
-      _hxp_wmctrl_tile "$id" right id
+      print -r -- "$id"
       return 0
     fi
     sleep 0.05
   done
+  return 1
+}
+
+_hxp_close_viewer() {
+  emulate -L zsh
+  local viewer="$1" pid="$2" wid="$3"
+  if [[ -n "$wid" ]] && command -v wmctrl >/dev/null 2>&1; then
+    wmctrl -ic "$wid" 2>/dev/null && return 0
+  fi
+  # Zathura has a dedicated process. Sioyek shares its process with other
+  # sessions, so without an owned window ID it must be left open.
+  if [[ "$viewer" != "sioyek" && -n "$pid" ]]; then
+    kill -TERM "$pid" 2>/dev/null
+  fi
+  return 0
 }
 
 # ---------- wpdf: watch + compile ----------
@@ -214,13 +218,13 @@ wpdf() {
   local stem="${base:r}"
   local ext="${base:e}"
 
-  local pdf="$dir/$stem.pdf"
+  local pdf; pdf="$(_hxp_pdf_for "$src" "$ext")"
   local temp_pdf="$dir/.${stem}.tmp.pdf"
   local err_log="$dir/.${stem}.error.log"
   local err_md="$dir/.${stem}.error.md"
   local debug_tex="$dir/.${stem}.debug.tex"
   local build_dir="$dir/.hxp_build_${stem}"
-  local synctex_gz="$dir/$stem.synctex.gz"
+  local synctex_gz="${pdf:r}.synctex.gz"
 
   case "$ext" in
     md) ;;
@@ -382,26 +386,14 @@ hxp() {
   local stem="${base:r}"
   local ext="${base:e}"
 
-  # For tex/typ, the PDF actually lives next to the project root, not the
-  # opened file. Compute that so the viewer points at the right artifact.
-  local root_src; root_src="$(_hxp_root_for "$src" "$ext")"
-  local root_dir="${root_src:h}"
-  local root_stem="${${root_src:t}:r}"
-  local pdf_dir pdf_stem
-  if [[ "$ext" == "tex" || "$ext" == "typ" ]]; then
-    pdf_dir="$root_dir"; pdf_stem="$root_stem"
-  else
-    pdf_dir="$dir"; pdf_stem="$stem"
-  fi
-
-  local pdf="$pdf_dir/$pdf_stem.pdf"
+  local pdf; pdf="$(_hxp_pdf_for "$src" "$ext")"
   local temp_pdf="$dir/.${stem}.tmp.pdf"
   local err_log="$dir/.${stem}.error.log"
   local err_md="$dir/.${stem}.error.md"
   local debug_tex="$dir/.${stem}.debug.tex"
   local build_dir="$dir/.hxp_build_${stem}"
   local synctex_tex="$build_dir/${stem}.hxp.tex"
-  local synctex_gz="$pdf_dir/$pdf_stem.synctex.gz"
+  local synctex_gz="${pdf:r}.synctex.gz"
 
   # Resolve the editor terminal's X11 window ID before anything else moves
   # focus. $WINDOWID is set by some terminals; _hxp_active_window_id falls
@@ -441,17 +433,46 @@ hxp() {
     _hxp_wmctrl_tile :ACTIVE: left
   fi
 
-  case "$viewer" in
-    sioyek)
-      sioyek --new-window "$pdf" >/dev/null 2>&1 &!
-      # Auto-enable synctex mode so right-click triggers inverse search
-      # without needing to press F4 first.
-      { sleep 0.5 && sioyek --execute-command toggle_synctex --nofocus; } >/dev/null 2>&1 &!
-      ;;
-    zathura|*) zathura "$pdf" >/dev/null 2>&1 &! ;;
-  esac
-  local zpid=$!
-  _hxp_tile_viewer_when_ready "$viewer" "$zpid" "$pdf"
+  local before_windows="" viewer_wid="" zpid="" track_window=0 launch_lockfd=""
+  local launch_lock="${state_file:h}/viewer-launch.lock"
+  if command -v wmctrl >/dev/null 2>&1 && wmctrl -l >/dev/null 2>&1; then
+    # Serialize snapshot -> launch -> identification across hxp sessions. Two
+    # simultaneous Sioyek launches otherwise see each other's new windows.
+    if zmodload zsh/system 2>/dev/null &&
+        : >> "$launch_lock" &&
+        zsystem flock -t 10 -i 0.05 -f launch_lockfd "$launch_lock"; then
+      track_window=1
+    else
+      print -u2 -- 'hxp: could not lock viewer startup; retry the session'
+      _hxp_sweep_artifacts "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" "$build_dir"
+      rm -f -- "$state_file"
+      return 2
+    fi
+  fi
+
+  {
+    if (( track_window )); then
+      before_windows="$(wmctrl -l 2>/dev/null | awk '{print $1}')" || track_window=0
+    fi
+    case "$viewer" in
+      sioyek)
+        sioyek --new-window "$pdf" >/dev/null 2>&1 &!
+        zpid=$!
+        # Auto-enable synctex mode so right-click triggers inverse search
+        # without needing to press F4 first.
+        { sleep 0.5 && sioyek --execute-command toggle_synctex --nofocus; } >/dev/null 2>&1 &!
+        ;;
+      zathura|*) zathura "$pdf" >/dev/null 2>&1 &!; zpid=$! ;;
+    esac
+    if (( track_window )); then
+      viewer_wid="$(_hxp_wait_for_viewer_window "$viewer" "$zpid" "$pdf" "$before_windows")"
+    fi
+  } always {
+    [[ -n "$launch_lockfd" ]] && zsystem flock -u "$launch_lockfd"
+  }
+  # Persist the owned window so forward search never has to pick among titles.
+  print -r -- "viewer_windowid=$viewer_wid" >> "$state_file" 2>/dev/null
+  [[ -n "$viewer_wid" ]] && _hxp_wmctrl_tile "$viewer_wid" right id
 
   # --no-initial: we already ran _hxp_compile_once above; don't make the
   # watcher repeat the first full build on startup.
@@ -462,23 +483,7 @@ hxp() {
   cleanup() {
     [[ -n "$wpid" ]] && { pkill -TERM -P "$wpid" 2>/dev/null; kill -TERM "$wpid" 2>/dev/null; }
 
-    # Close *our* viewer window via wmctrl first. Sioyek runs as a single
-    # shared instance with one window per --new-window invocation; killing
-    # the process would close concurrent hxp sessions' windows too.
-    local _closed=0 _wid=""
-    if command -v wmctrl >/dev/null 2>&1; then
-      _wid="$(_hxp_find_viewer_window "$viewer" "$zpid" "$pdf")"
-      if [[ -n "$_wid" ]] && wmctrl -ic "$_wid" 2>/dev/null; then
-        _closed=1
-      fi
-    fi
-
-    if (( ! _closed )); then
-      [[ -n "$zpid" ]] && kill -TERM "$zpid" 2>/dev/null
-      pgrep -af "(zathura|sioyek) .*${pdf}" 2>/dev/null | awk '{print $1}' | while read -r p; do
-        kill -TERM "$p" 2>/dev/null
-      done
-    fi
+    _hxp_close_viewer "$viewer" "$zpid" "$viewer_wid"
 
     # Sweep transient build artifacts. Keep the rendered PDF — that's the
     # output the user wanted. Drop everything else: error log/markdown, the

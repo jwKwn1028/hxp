@@ -49,15 +49,18 @@ state_key="$(printf '%s' "$src" | sha1sum | cut -d' ' -f1)"
 state_file="$state_dir/$state_key.state"
 
 state_src=""; state_pdf=""; state_viewer=""; state_pid=""
+state_viewer_windowid=""; state_window_known=0
 
 read_state() {
   state_src=""; state_pdf=""; state_viewer=""; state_pid=""
+  state_viewer_windowid=""; state_window_known=0
   [[ -r "$1" ]] || return 1
   while IFS='=' read -r k v; do
     case "$k" in
       src)    state_src="$v" ;;
       pdf)    state_pdf="$v" ;;
       viewer) state_viewer="$v" ;;
+      viewer_windowid) state_viewer_windowid="$v"; state_window_known=1 ;;
       pid)    state_pid="$v" ;;
     esac
   done < "$1"
@@ -74,6 +77,7 @@ read_state "$state_file"
 if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
   rm -f -- "$state_file" "$state_file.buf" 2>/dev/null
   state_pdf=""; state_viewer=""
+  state_viewer_windowid=""; state_window_known=0
 fi
 
 # No state for this file — hxp was likely launched on the project root (an
@@ -83,17 +87,18 @@ if [[ -z "$state_pdf" ]]; then
     [[ -r "$sf" && "$sf" != "$state_file" ]] || continue
     read_state "$sf"
     if [[ -z "$state_src" ]]; then
-      state_pdf=""; state_viewer=""; continue
+      state_pdf=""; state_viewer=""; state_viewer_windowid=""; state_window_known=0; continue
     fi
     if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
       rm -f -- "$sf" "$sf.buf" 2>/dev/null
-      state_pdf=""; state_viewer=""; continue
+      state_pdf=""; state_viewer=""; state_viewer_windowid=""; state_window_known=0; continue
     fi
     sf_dir="$(dirname "$(realpath -m -- "$state_src" 2>/dev/null || printf '%s' "$state_src")")"
     case "$dir" in
       "$sf_dir"|"$sf_dir"/*) break ;;
     esac
     state_pdf=""; state_viewer=""
+    state_viewer_windowid=""; state_window_known=0
   done
 fi
 
@@ -224,15 +229,26 @@ if [[ -z "$viewer" ]] || ! command -v "$viewer" >/dev/null 2>&1; then
   exit 1
 fi
 
-# Focus the window showing this PDF, matching the basename in the title as hxp
-# does when tiling. hxp opens each document with --new-window in sioyek's shared
-# instance, so its "current" window is whichever session was touched last.
+# Prefer the window hxp recorded at launch, even when multiple projects have
+# identically named PDFs. Legacy/no-state calls may use a unique title match;
+# an ambiguous or vanished window must never redirect another session.
 raise_viewer_window() {
   command -v wmctrl >/dev/null 2>&1 || return 1
   local want="${pdf##*/}" id
-  id="$(wmctrl -l 2>/dev/null | awk -v b="$want" '
-    BEGIN { b = tolower(b) }
-    { if (index(tolower($0), b) > 0) { print $1; exit } }
+  id="$(wmctrl -lx 2>/dev/null | awk -v b="$want" -v viewer="$viewer" \
+      -v owned="$state_viewer_windowid" -v known="$state_window_known" '
+    BEGIN { b=tolower(b); viewer=tolower(viewer); owned=tolower(owned) }
+    {
+      if (index(tolower($3), viewer) == 0) next
+      if (known) {
+        if (tolower($1) == owned) print $1
+        next
+      }
+      title=""
+      for (i=5; i<=NF; i++) title=title " " $i
+      if (index(tolower(title), b) > 0) { count++; id=$1 }
+    }
+    END { if (!known && count == 1) print id }
   ')"
   [[ -n "$id" ]] || return 1
   wmctrl -i -a "$id" >/dev/null 2>&1 || return 1
