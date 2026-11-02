@@ -1,15 +1,6 @@
 #!/usr/bin/env bash
-# Maps a .md line onto pandoc's generated .hxp.tex. The mirror of hxp-mdline,
-# which goes the other way for inverse search.
-#
-# Forward search needs this because synctex records only the .hxp.tex — a query
-# naming the .md matches nothing ("SyncTeX Warning: No tag for <file>.md").
-#
-# Anchors on the line's own text, which pandoc copies through near-verbatim:
-# whole line, then shorter leading word-prefixes (long paragraphs get reflowed
-# at ~72 columns), then single words.
-#
 # Usage: hxp-texline <md-file> <tex-file> <md-line>
+# Print the matching TeX line, or nothing; match prose anchors heuristically.
 # Prints the tex line number, or nothing if it can't map.
 
 set -u
@@ -20,7 +11,7 @@ md_line="${3:-}"
 
 [[ -z "$md_line" || ! -f "$md" || ! -f "$tex" ]] && exit 0
 
-# Body only: preamble words (title, author, package options) collide with prose.
+# Skip preamble matches.
 body_start="$(grep -n -m1 -F '\begin{document}' "$tex" 2>/dev/null | cut -d: -f1)"
 [[ -z "$body_start" ]] && body_start=1
 
@@ -29,15 +20,10 @@ md_total="$(awk 'END { print NR }' "$md" 2>/dev/null)"
 tex_total="$(awk 'END { print NR }' "$tex" 2>/dev/null)"
 [[ -z "$tex_total" || "$tex_total" -eq 0 ]] && exit 0
 
-# Furthest a floor may plausibly sit. md and tex advance together, so a floor
-# well past the proportional position means the anchor matched a recurrence —
-# a contents entry naming a section that appears again far below. Doubled and
-# padded, so it only rejects the clearly wrong.
+# Reject implausibly late anchors from repeated headings.
 floor_limit="$(awk -v b="$body_start" -v t="$tex_total" -v l="$md_line" -v m="$md_total" \
   'BEGIN { printf "%d", b + (l / m) * (t - b) * 2 + 50 }')"
 
-# Reduce to the prose pandoc carries across. Inline code and link targets go
-# first — those it rewrites (\texttt{}, \href{}).
 strip_md() {
   sed -n "${1}p" "$md" 2>/dev/null \
     | sed -E '
@@ -52,14 +38,13 @@ strip_md() {
       '
 }
 
-# index(), not a regex match: anchors are literal text and carry ".", "-", "$".
+# Match anchors literally.
 find_in_tex() {  # <anchor> <start-line>
   awk -v start="$2" -v tok="$1" '
     NR >= start && index($0, tok) { print NR; exit }
   ' "$tex" 2>/dev/null
 }
 
-# Anchors for one md line, most specific first.
 candidates_for() {
   local text
   text="$(strip_md "$1")"
@@ -81,9 +66,7 @@ candidates_for() {
     | awk '!seen[$2]++ { print $2 }'
 }
 
-# An opening prefix of a nearby line, to pin the search below. Deliberately not
-# the whole line: pandoc reflows paragraphs, so a wrapped md line is split
-# across tex lines and never matches contiguously.
+# Short prefixes survive Pandoc paragraph reflow.
 floor_anchor_for() {
   local text
   local -a w
@@ -96,10 +79,7 @@ floor_anchor_for() {
   return 0
 }
 
-# Weak anchors (one-word list items, headings repeated in a contents list) match
-# the first occurrence document-wide. md and tex advance together, so pin the
-# search to the nearest preceding line that can be placed confidently. Landing
-# early is harmless; landing late is caught by the unpinned retry below.
+# Use preceding prose to disambiguate repeated headings and weak anchors.
 search_floor() {
   local i cand hit
   for (( i = md_line - 1; i >= 1 && i > md_line - 25; i-- )); do
@@ -115,7 +95,6 @@ search_floor() {
   printf '%s\n' "$body_start"
 }
 
-# Cursor line first, then nearest neighbours.
 scan_from() {  # <start-line>
   local off probe cand hit
   for off in 0 1 -1 2 -2 3 -3 4 -4 5 -5 6 -6; do
@@ -133,7 +112,7 @@ scan_from() {  # <start-line>
   return 1
 }
 
-# A mis-placed floor can push the real match out of range — retry unpinned.
+# Retry without the floor if it excluded the real match.
 result="$(scan_from "$(search_floor)")" || result=""
 [[ -z "$result" ]] && result="$(scan_from "$body_start")"
 

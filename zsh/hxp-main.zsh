@@ -1,29 +1,4 @@
-# ~/.zsh/hxp-main.zsh
-# Top-level entrypoints for the hxp / wpdf live preview workflow. Sourced
-# by .zshrc with a single line — the actual functions live here so the
-# config can be tracked in version control without dragging the rest of
-# the user's shell setup into the repo.
-#
-# Layering: hxp-main.zsh sources hxp-lib.zsh (helpers used by both this
-# file and the watchexec-driven hxp-compile script).
-
-# ---------- hxp / wpdf: live editor + PDF preview ----------
-# Supports markdown, latex, typst. The compile helpers live in
-# ~/.zsh/hxp-lib.zsh so that ~/.local/bin/hxp-compile (driven by watchexec)
-# can source them without paying the cost of the whole .zshrc.
-#
-# Knobs (env vars):
-#   HXP_EDITOR           : force "helix" (default) or "micro"; `hxp --micro`
-#                          and `hxp --helix` set it for one invocation
-#   HXP_VIEWER           : force "sioyek" or "zathura"
-#   HXP_VIEWER_PID       : set internally; viewer's PID (used to send SIGHUP)
-#   HXP_NO_NATIVE_TYP=1  : disable `typst watch`, use generic compile loop
-#   HXP_NO_WATCHEXEC=1   : disable watchexec, fall back to inotifywait
-#   HXP_NO_TILE=1        : disable wmctrl tiling of editor/viewer windows
-#   HXP_WM               : force "tiling" or "floating"; otherwise auto-detected.
-#                          Under tiling WMs (i3, sway, bspwm, …) we skip the
-#                          wmctrl -e geometry calls and let the WM (e.g.
-#                          autotiling) place the viewer beside the editor.
+# hxp / wpdf entrypoints; source from .zshrc.
 
 [[ -r "$HOME/.zsh/hxp-lib.zsh" ]] && source "$HOME/.zsh/hxp-lib.zsh"
 
@@ -93,8 +68,7 @@ _hxp_wmctrl_workarea() {
 _hxp_wmctrl_tile() {
   emulate -L zsh
   [[ "$HXP_NO_TILE" == "1" ]] && return 0
-  # On tiling WMs, _NET_MOVERESIZE_WINDOW is ignored for managed containers —
-  # let the WM (e.g. autotiling on i3) place the window itself.
+  # Let tiling WMs place managed windows.
   [[ "$(_hxp_wm_kind)" == "tiling" ]] && return 0
   command -v wmctrl >/dev/null 2>&1 || return 1
 
@@ -132,9 +106,7 @@ _hxp_find_viewer_window() {
   local base="${${pdf:t}:l}"
   local id
 
-  # Only consider windows created after our launch snapshot. Sioyek's shared
-  # process can own multiple main.pdf windows; neither PID nor title identifies
-  # a session. If simultaneous launches are ambiguous, do not claim a window.
+  # Claim only new, unambiguous windows; Sioyek shares its process.
   id="$(wmctrl -lpx 2>/dev/null | awk -v viewer="$viewer" -v pid="$pid" \
       -v base="$base" -v before="$before" '
     BEGIN {
@@ -143,6 +115,11 @@ _hxp_find_viewer_window() {
     }
     {
       if (old[tolower($1)] || index(tolower($4), viewer) == 0) next
+      # Identify Zathura by PID; window titles are configurable.
+      if (viewer == "zathura") {
+        if ($3 == pid) { pid_count++; pid_id=$1 }
+        next
+      }
       title=""
       for (i=6; i<=NF; i++) title=title " " $i
       if (index(tolower(title), base) == 0) next
@@ -162,7 +139,7 @@ _hxp_wait_for_viewer_window() {
   emulate -L zsh
   command -v wmctrl >/dev/null 2>&1 || return 1
 
-  # Window ownership is needed for cleanup/search even when tiling is disabled.
+  # Track ownership even when tiling is disabled.
   local viewer="$1" pid="$2" pdf="$3" before="$4" id i
   for i in {1..40}; do
     id="$(_hxp_find_viewer_window "$viewer" "$pid" "$pdf" "$before")"
@@ -181,15 +158,12 @@ _hxp_close_viewer() {
   if [[ -n "$wid" ]] && command -v wmctrl >/dev/null 2>&1; then
     wmctrl -ic "$wid" 2>/dev/null && return 0
   fi
-  # Zathura has a dedicated process. Sioyek shares its process with other
-  # sessions, so without an owned window ID it must be left open.
+  # Never kill the shared Sioyek process.
   if [[ "$viewer" != "sioyek" && -n "$pid" ]]; then
     kill -TERM "$pid" 2>/dev/null
   fi
   return 0
 }
-
-# ---------- wpdf: watch + compile ----------
 
 wpdf() {
   emulate -L zsh
@@ -233,63 +207,37 @@ wpdf() {
     *)   print -u2 -- "wpdf: unsupported extension: $ext"; return 2 ;;
   esac
 
-  # Sweep our transient build artifacts on exit. hxp() does its own sweep when
-  # it drives wpdf, but a standalone `wpdf foo.tex` would otherwise leave the
-  # build dir, logs, and synctex sidecar behind. `return` (not `exit`) so a
-  # foreground Ctrl-C doesn't take the interactive shell down with it.
+  # Return on interruption so foreground wpdf leaves the shell alive.
   trap '_hxp_sweep_artifacts "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" "$build_dir"; return 0' INT TERM HUP
 
-  # Initial compile so the viewer has something to show immediately — skipped
-  # when hxp already rendered the first frame before launching the viewer.
   if (( no_initial == 0 )); then
     _hxp_compile_once "$src" "$ext" "$dir" "$stem" "$pdf" "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$build_dir" >/dev/null
   fi
 
   (( quiet == 0 )) && print -- "wpdf: watching $src -> $pdf"
 
-  # Native incremental watcher for typst (much faster than full recompiles).
-  if [[ "$ext" == "typ" && "$HXP_NO_NATIVE_TYP" != "1" ]]; then
+  if [[ "$ext" == "typ" && "$HXP_NO_NATIVE_TYP" != "1" ]] && zmodload zsh/zselect 2>/dev/null; then
     local root_src; root_src="$(_hxp_root_for "$src" typ)"
     local root_dir="${root_src:h}"
 
-    # `typst watch` writes the PDF in-place on each successful compile and only
-    # streams diagnostics on failure. Pipe its status stream through the render
-    # helper so compile *errors* also surface — an error PDF over the stale
-    # build plus err_md for hxp_errs — matching the tex/md behaviour. (Set
-    # HXP_NO_NATIVE_TYP=1 to use the generic loop instead.)
-    typst watch --root "$root_dir" "$root_src" "$pdf" 2>&1 \
-      | _hxp_typst_watch_render "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf"
+    # Publish snapshots atomically; retain watch output for error recovery.
+    local watch_pdf="${temp_pdf:r}.watch.pdf"
+    typst watch --root "$root_dir" "$root_src" "$watch_pdf" 2>&1 \
+      | _hxp_typst_watch_render "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf" "$watch_pdf"
     _hxp_sweep_artifacts "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" "$build_dir"
     return
   fi
 
-  # Generic watch loop (md, tex, and typ when native disabled).
-  #
-  # Watch the whole *project*, not just the opened file: a multi-file tex/typ
-  # doc rebuilds when a sibling \input/#include or the .bib changes, not only
-  # when the file you opened is saved. The root often lives in a different dir
-  # than the opened file, so watch the root's directory; markdown has no root,
-  # so root_dir collapses to the source's own dir. _hxp_watch_exts/_hxp_watch_match
-  # decide which changes count (and exclude hxp's own artifacts).
+  # Watch the root directory so included sources also trigger builds.
   local root_src; root_src="$(_hxp_root_for "$src" "$ext")"
   local watch_dir="${root_src:h}"
   local watch_exts; watch_exts="$(_hxp_watch_exts "$ext")"
   local -a inotify_recurse=()
   [[ "$ext" == "tex" || "$ext" == "typ" ]] && inotify_recurse=( -r )
 
-  # Prefer `watchexec` — kernel-level debouncing, follows symlinks,
-  # respects gitignore, handles editor swap-file dance better than raw
-  # inotifywait. Falls back to inotifywait when not installed.
   if _hxp_need_cmd watchexec && [[ "$HXP_NO_WATCHEXEC" != "1" ]]; then
     (( quiet == 0 )) && print -- "wpdf: watchexec mode"
-    # Not `exec` — keep the wpdf shell alive so its cleanup trap fires on exit
-    # (hxp reaps this child explicitly; see its cleanup()).
-    #
-    # `--ignore '**/.*'` drops every one of hxp's dot-prefixed artifacts (the
-    # .md error doc shares markdown's watched extension and would otherwise
-    # loop) — watchexec matches ignores relative to the watched root, so a
-    # project under a hidden dir is unaffected. The build-dir glob drops the
-    # md->tex intermediate, whose basename isn't dotted.
+    # Keep the shell for cleanup; ignore generated sources to prevent loops.
     watchexec \
       --debounce 250ms \
       --postpone \
@@ -307,18 +255,12 @@ wpdf() {
     return
   fi
 
-  # Fallback: inotifywait with a manual 200ms drain. Same project-wide scope —
-  # watch the root dir (recursively for tex/typ, whose includes may sit in
-  # subdirs) and let _hxp_watch_match filter out irrelevant paths and our own
-  # artifacts, the job watchexec does above via -e / --ignore.
+  # Fallback: filter project events and debounce for 200ms.
   local changed _drain
   while IFS= read -r changed; do
     _hxp_watch_match "$ext" "$changed" || continue
     while IFS= read -r -t 0.2 _drain 2>/dev/null; do :; done
 
-    # If the primary source was removed (rm, or atomic-rename gone wrong), stop
-    # rather than burning compiles on a missing file. The user's next `hxp`
-    # invocation will re-scaffold or open the new path cleanly.
     [[ -f "$src" ]] || { (( quiet == 0 )) && print -- "wpdf: source vanished, exiting"; break; }
 
     if _hxp_compile_once "$src" "$ext" "$dir" "$stem" "$pdf" "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$build_dir" >/dev/null; then
@@ -341,10 +283,7 @@ hxp() {
   setopt pipefail
   unsetopt monitor
 
-  # Exported (not just local) so everything hxp spawns — the viewer, and hence
-  # the hxp-jump / hxp-fwd shims it launches — agrees on the editor. The state
-  # file below is still the authority; sioyek's shared instance keeps only the
-  # environment of whichever session started it first.
+  # Export for child processes; session state overrides inherited settings.
   local -x HXP_EDITOR="${HXP_EDITOR:-}"
 
   while [[ "$1" == -* ]]; do
@@ -395,19 +334,12 @@ hxp() {
   local synctex_tex="$build_dir/${stem}.hxp.tex"
   local synctex_gz="${pdf:r}.synctex.gz"
 
-  # Resolve the editor terminal's X11 window ID before anything else moves
-  # focus. $WINDOWID is set by some terminals; _hxp_active_window_id falls
-  # back to xprop _NET_ACTIVE_WINDOW for terminals that don't.
+  # Capture the editor window before focus changes.
   local editor_wid; editor_wid="$(_hxp_editor_window_id)"
 
-  # Resolved ahead of the launch so it can go in the state file: hxp-fwd needs
-  # it, and can't sniff it (one sioyek instance names only the first PDF).
   local viewer; viewer="$(_hxp_viewer)"
 
-  # State file for hxp-jump and hxp-fwd: lets inverse search drive the editor
-  # this session already opened instead of spawning a second one, and forward
-  # search find this PDF + viewer. `editor=` is what tells hxp-jump whether to
-  # type helix's `:open` or micro's command-bar `open` / `goto`.
+  # Search helpers use this session state to find the editor and viewer.
   local state_file; state_file="$(_hxp_state_file "$src")"
   mkdir -p -- "${state_file:h}" 2>/dev/null
   {
@@ -436,8 +368,7 @@ hxp() {
   local before_windows="" viewer_wid="" zpid="" track_window=0 launch_lockfd=""
   local launch_lock="${state_file:h}/viewer-launch.lock"
   if command -v wmctrl >/dev/null 2>&1 && wmctrl -l >/dev/null 2>&1; then
-    # Serialize snapshot -> launch -> identification across hxp sessions. Two
-    # simultaneous Sioyek launches otherwise see each other's new windows.
+    # Serialize launches so sessions cannot claim each other's windows.
     if zmodload zsh/system 2>/dev/null &&
         : >> "$launch_lock" &&
         zsystem flock -t 10 -i 0.05 -f launch_lockfd "$launch_lock"; then
@@ -458,8 +389,6 @@ hxp() {
       sioyek)
         sioyek --new-window "$pdf" >/dev/null 2>&1 &!
         zpid=$!
-        # Auto-enable synctex mode so right-click triggers inverse search
-        # without needing to press F4 first.
         { sleep 0.5 && sioyek --execute-command toggle_synctex --nofocus; } >/dev/null 2>&1 &!
         ;;
       zathura|*) zathura "$pdf" >/dev/null 2>&1 &!; zpid=$! ;;
@@ -470,12 +399,11 @@ hxp() {
   } always {
     [[ -n "$launch_lockfd" ]] && zsystem flock -u "$launch_lockfd"
   }
-  # Persist the owned window so forward search never has to pick among titles.
+  # Pin searches to our process when another viewer has the same PDF open.
+  print -r -- "viewer_pid=$zpid" >> "$state_file" 2>/dev/null
   print -r -- "viewer_windowid=$viewer_wid" >> "$state_file" 2>/dev/null
   [[ -n "$viewer_wid" ]] && _hxp_wmctrl_tile "$viewer_wid" right id
 
-  # --no-initial: we already ran _hxp_compile_once above; don't make the
-  # watcher repeat the first full build on startup.
   HXP_VIEWER_PID=$zpid HXP_VIEWER_KIND=$viewer wpdf -q --no-initial "$src" >/dev/null 2>&1 &!
   local wpid=$!
 
@@ -485,14 +413,9 @@ hxp() {
 
     _hxp_close_viewer "$viewer" "$zpid" "$viewer_wid"
 
-    # Sweep transient build artifacts. Keep the rendered PDF — that's the
-    # output the user wanted. Drop everything else: error log/markdown, the
-    # .debug.tex pandoc emits for md→tex line-mapping, the latex build dir,
-    # the synctex sidecar (only useful while the viewer is open), and the
-    # state file used by hxp-jump.
-    rm -f -- "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_tex" "$synctex_gz" 2>/dev/null
+    # Remove scratch files; keep the rendered PDF.
+    rm -f -- "$temp_pdf" "${temp_pdf:r}.watch.pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_tex" "$synctex_gz" 2>/dev/null
     rm -rf -- "$build_dir" 2>/dev/null
-    # .buf is hxp-jump's note of which file it last drove micro to.
     [[ -n "$state_file" ]] && rm -f -- "$state_file" "$state_file.buf" 2>/dev/null
   }
 

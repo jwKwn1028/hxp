@@ -1,12 +1,5 @@
 #!/usr/bin/env zsh
-# Smoke test for the compile pipeline. For each language whose toolchain is
-# present it asserts: a good source produces a real PDF (rc 0), and a broken
-# source fails (rc 1) but still produces an error PDF. Languages whose tools
-# are missing are SKIPPED, so this is useful locally with a partial toolchain
-# and exhaustive in CI where everything is installed.
-#
-# Also exercises the typst `watch` render loop (#1) against a canned transcript
-# so the error-surfacing path is covered without a long-running watcher.
+# Compile success, failure, and watch recovery; skip missing toolchains.
 
 emulate -L zsh
 set -u
@@ -37,7 +30,6 @@ compile() {  # src ext
     "$dir/.${stem}.error.md" "$dir/.${stem}.debug.tex" "$dir/.hxp_build_${stem}"
 }
 
-# ---------- markdown ----------
 if _hxp_need_cmd pandoc; then
   print -r -- "  [markdown]"
   d="$work/md"; mkdir -p "$d"
@@ -54,7 +46,6 @@ else
   skips+=(markdown)
 fi
 
-# ---------- latex ----------
 if _hxp_need_cmd latexmk; then
   print -r -- "  [latex]"
   d="$work/tex"; mkdir -p "$d"
@@ -68,8 +59,7 @@ if _hxp_need_cmd latexmk; then
   check "tex bad rc"        1 "$rc"
   check "tex bad error pdf" 1 "$(is_pdf "$d/a.pdf" && echo 1 || echo 0)"
 
-  # Launch on an included source from outside the project. latexmk must run
-  # at the root so relative inputs resolve; the output still belongs there.
+  # Included sources must build from the project root.
   d="$work/tex project"; mkdir -p "$d/chapters"
   print -rl -- '\documentclass{article}' '\begin{document}' '\input{chapters/intro}' '\end{document}' >| "$d/main.tex"
   print -r -- 'Included chapter.' >| "$d/chapters/intro.tex"
@@ -81,7 +71,6 @@ else
   skips+=(latex)
 fi
 
-# ---------- typst (compile + the watch render loop) ----------
 if _hxp_need_cmd typst; then
   print -r -- "  [typst]"
   d="$work/typ"; mkdir -p "$d"
@@ -89,6 +78,15 @@ if _hxp_need_cmd typst; then
   compile "$d/a.typ" typ; rc=$?
   check "typ good rc"  0 "$rc"
   check "typ good pdf" 1 "$(is_pdf "$d/a.pdf" && echo 1 || echo 0)"
+
+  # Publishing must preserve readers of the previous PDF.
+  old_digest="$(sha256sum < "$d/a.pdf")"
+  exec {reader_fd}< "$d/a.pdf"
+  print -rl -- '= Updated' '' 'New content after saving.' >| "$d/a.typ"
+  compile "$d/a.typ" typ; rc=$?
+  check 'typ updated rc' 0 "$rc"
+  check 'typ keeps an open reader stable' "$old_digest" "$(sha256sum <&$reader_fd)"
+  exec {reader_fd}<&-
 
   print -rl -- '= Bad' '#let x =' >| "$d/a.typ"
   compile "$d/a.typ" typ; rc=$?
@@ -103,7 +101,6 @@ if _hxp_need_cmd typst; then
   check "typ included source root pdf" 1 "$(is_pdf "$d/main.pdf" && echo 1 || echo 0)"
   check "typ no stray chapter pdf" 0 "$([[ -e "$d/chapters/intro.pdf" ]] && echo 1 || echo 0)"
 
-  # ----- typst `watch` render loop, fed a canned 0.15 transcript -----
   print -r -- "  [typst watch loop]"
   d2="$work/typw"; mkdir -p "$d2"
   src="$d2/t.typ"; pdf="$d2/t.pdf"
@@ -111,7 +108,6 @@ if _hxp_need_cmd typst; then
   tmp="$d2/.t.tmp.pdf"; dtex="$d2/.t.debug.tex"
   print -rl -- '= Doc' '#let x =' >| "$src"
 
-  # failure transcript -> err_md written, error PDF rendered
   print -rl -- \
     'watching t.typ' 'writing to t.pdf' '' '[14:08:23] compiling ...' '' \
     'watching t.typ' 'writing to t.pdf' '' '[14:08:23] compiled with errors' '' \
@@ -121,12 +117,74 @@ if _hxp_need_cmd typst; then
   check "watch fail -> error pdf"  1 "$(is_pdf "$pdf" && echo 1 || echo 0)"
   check "watch fail -> err_log"    1 "$(grep -q 'expected expression' "$errlog" && echo 1 || echo 0)"
 
-  # success transcript -> err_md cleared
+  # Retain watch output to recover from errors without re-exporting.
+  watch_pdf="${tmp:r}.watch.pdf"
+  print -rl -- '= Watch snapshot' 'Completed output.' >| "$d2/good.typ"
+  typst compile "$d2/good.typ" "$watch_pdf"
+  old_digest="$(sha256sum < "$pdf")"
+  exec {reader_fd}< "$pdf"
   print -rl -- \
     'watching t.typ' 'writing to t.pdf' '' '[14:08:25] compiling ...' '' \
     'watching t.typ' 'writing to t.pdf' '' '[14:08:25] compiled successfully in 2.04 ms' \
-    | _hxp_typst_watch_render "$src" typ "$errlog" "$errmd" "$tmp" "$dtex" "$pdf"
+    | _hxp_typst_watch_render "$src" typ "$errlog" "$errmd" "$tmp" "$dtex" "$pdf" "$watch_pdf"
   check "watch ok -> no err_md"    0 "$([[ -f "$errmd" ]] && echo 1 || echo 0)"
+  check 'watch publishes the completed PDF' "$(sha256sum < "$watch_pdf")" "$(sha256sum < "$pdf")"
+  check 'watch keeps an open reader stable' "$old_digest" "$(sha256sum <&$reader_fd)"
+  exec {reader_fd}<&-
+  check 'watch retains its private output' 1 "$(is_pdf "$watch_pdf" && echo 1 || echo 0)"
+  _hxp_sweep_artifacts "$tmp" "$errlog" "$errmd" "$dtex" '' "$d2/.hxp_build_t"
+  check 'watch output is swept on exit' 0 "$([[ -e "$watch_pdf" ]] && echo 1 || echo 0)"
+
+  if _hxp_need_cmd inotifywait && _hxp_need_cmd pandoc; then
+    print -r -- '  [native typst watch publication]'
+    (
+      source "$repo/zsh/hxp-main.zsh"
+      source "$repo/zsh/hxp-lib.zsh"
+      export HXP_NO_NATIVE_TYP=0
+      live_dir="$work/live-watch"
+      mkdir -p "$live_dir"
+      live_src="$live_dir/live.typ"
+      live_pdf="$live_dir/live.pdf"
+      live_stage="$live_dir/.live.tmp.watch.pdf"
+      live_error="$live_dir/.live.error.md"
+      print -rl -- '= Original' 'Stable reader.' > "$live_src"
+      wpdf -q --no-initial "$live_src" > "$live_dir/watcher.log" 2>&1 &
+      native_pid=$!
+      trap 'pkill -TERM -P "$native_pid" 2>/dev/null; kill -TERM "$native_pid" 2>/dev/null; wait "$native_pid" 2>/dev/null' EXIT
+      for attempt in {1..200}; do
+        [[ -s "$live_pdf" ]] && break
+        sleep 0.05
+      done
+      check 'native watch publishes its first PDF' 1 "$(is_pdf "$live_pdf" && echo 1 || echo 0)"
+      if [[ -s "$live_pdf" ]]; then
+        old_digest="$(sha256sum < "$live_pdf")"
+        exec {reader_fd}< "$live_pdf"
+        print -rl -- '= Updated' 'Next stable snapshot.' > "$live_src"
+        for attempt in {1..200}; do
+          [[ "$(sha256sum < "$live_pdf")" != "$old_digest" ]] && break
+          sleep 0.05
+        done
+        check 'native watch updates after a save' yes "$([[ "$(sha256sum < "$live_pdf")" != "$old_digest" ]] && print yes)"
+        check 'native watch preserves an external reader' "$old_digest" "$(sha256sum <&$reader_fd)"
+        exec {reader_fd}<&-
+
+        print -rl -- '= Broken' '#let x =' > "$live_src"
+        for attempt in {1..200}; do
+          [[ -s "$live_error" ]] && break
+          sleep 0.05
+        done
+        check 'native watch reports an error' yes "$([[ -s "$live_error" ]] && print yes)"
+        print -rl -- '= Updated' 'Next stable snapshot.' > "$live_src"
+        for attempt in {1..200}; do
+          [[ ! -e "$live_error" ]] && break
+          sleep 0.05
+        done
+        check 'native watch recovers unchanged good content' no "$([[ -e "$live_error" ]] && print yes || print no)"
+        check 'native watch restores its good PDF' "$(sha256sum < "$live_stage")" "$(sha256sum < "$live_pdf")"
+      fi
+      exit "$fail"
+    ) || fail=1
+  fi
 else
   skips+=(typst)
 fi

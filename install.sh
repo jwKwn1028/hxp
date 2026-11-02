@@ -1,14 +1,8 @@
 #!/usr/bin/env bash
-# Install hxp by symlinking the repo's tracked files into the standard
-# locations under $HOME. Re-runnable: existing files get backed up to
-# *.bak.<timestamp> on the first run, and existing symlinks pointing at
-# this repo are left alone.
-#
-# Run `./install.sh --deps` to print the dependency list without installing.
+# Install symlinks; back up existing files. --deps prints dependencies.
 
 set -euo pipefail
 
-# Canonical dependency list. The README points here so the two never drift.
 print_deps() {
   cat <<'EOF'
 Dependencies (install via your package manager):
@@ -87,8 +81,6 @@ link "$repo/bin/hxp-dual-panelify"        "$HOME/.local/bin/hxp-dual-panelify"
 link "$repo/config/zathura/zathurarc"     "$HOME/.config/zathura/zathurarc"
 link "$repo/config/sioyek/prefs_user.config" "$HOME/.config/sioyek/prefs_user.config"
 link "$repo/config/sioyek/keys_user.config" "$HOME/.config/sioyek/keys_user.config"
-# micro's half of forward search. helix can pass its cursor position to a shell
-# command from a keybinding; micro cannot, so the call comes from a plugin.
 link "$repo/config/micro/plug/hxpfwd"     "$HOME/.config/micro/plug/hxpfwd"
 
 cat <<'EOF'

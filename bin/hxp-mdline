@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
-# Shared markdown<-tex line-mapping heuristic, used by BOTH hxp-jump (PDF
-# inverse search) and hxp-lib.zsh's error renderer so the two can't drift.
-#
-# Maps a line in pandoc's generated .tex back to the most likely line in the
-# original .md: take a small window of tex around the line, strip latex
-# control sequences, pick the longest alphanumeric token, and find its first
-# occurrence in the markdown.
-#
 # Usage: hxp-mdline <md-file> <tex-file> <tex-line>
-# Prints the markdown line number on success; prints nothing if it can't map.
+# Print the Markdown line matching a distinctive nearby TeX token, or nothing.
 
 set -u
 

@@ -1,15 +1,9 @@
-# ~/.zsh/hxp-lib.zsh
-# Helpers for hxp / wpdf / hxp-compile. Sourced from .zshrc and from the
-# ~/.local/bin/hxp-compile wrapper. Keep this file self-contained so the
-# wrapper doesn't need to re-source the whole .zshrc on every recompile.
+# Compile and search helpers; keep independent of .zshrc.
 
 _hxp_need_cmd() { command -v "$1" >/dev/null 2>&1 }
 _hxp_abs() { print -r -- "${1:A}" }
 
-# Which awk to run. gawk is preferred when present, but every awk program in
-# this file is written to POSIX awk (no gawk-only 3-arg match), so mawk /
-# busybox awk work too. $HXP_AWK forces a specific binary (used by the tests
-# to exercise the mawk path).
+# Keep awk programs POSIX-compatible; HXP_AWK selects the test binary.
 _hxp_awk() {
   if [[ -n "$HXP_AWK" ]]; then print -r -- "$HXP_AWK"; return; fi
   if _hxp_need_cmd gawk; then print -r -- gawk; else print -r -- awk; fi
@@ -22,14 +16,7 @@ _hxp_viewer() {
   fi
 }
 
-# ---------- editor selection ----------
-# Which editor hxp launches, and which one hxp-jump drives on a reverse-search
-# click. "helix" (the default) or "micro"; `hxp --micro` just exports
-# HXP_EDITOR for the session so every helper agrees with the running editor.
-# Anything unrecognised falls back to helix rather than trying to spawn it —
-# the argv shapes below are editor-specific, so an unknown name has no meaning.
 _hxp_editor() {
-  # ${...:-} first: hxp-lib is sourced into shells that may run with nounset.
   [[ "${${HXP_EDITOR:-}:l}" == "micro" ]] && { print -r -- micro; return; }
   print -r -- helix
 }
@@ -41,11 +28,7 @@ _hxp_editor_bin() {
   esac
 }
 
-# argv for opening <file> at <line>[:<col>] plus any extra files, one word per
-# line. helix glues the position onto the path (file:line:col); micro takes it
-# as a separate leading `+line:col` (which then applies to every file it
-# opens). An empty <line> means "no position" for both. Split from
-# _hxp_editor_open so the argv shape is testable without spawning an editor.
+# Emit editor argv, one argument per line; omit empty positions.
 _hxp_editor_argv() {
   emulate -L zsh
   local editor="$1" file="$2" line="$3" col="$4"
@@ -73,25 +56,20 @@ _hxp_editor_argv() {
 
 _hxp_editor_open() {
   emulate -L zsh
-  # Not `argv` — that name *is* the positional-parameter array in zsh, so
-  # declaring it local would empty "$@" before it reaches _hxp_editor_argv.
+  # Avoid local argv: zsh aliases it to the positional parameters.
   local -a cmd
   cmd=( "${(@f)$(_hxp_editor_argv "$@")}" )
   "${cmd[@]}"
 }
 
-# Path of the per-source state file hxp() writes and hxp-jump / hxp-fwd read.
-# printf '%s' (no trailing newline) so the digest matches what those bash
-# helpers compute from the synctex-supplied path.
+# Hash without a trailing newline to match the bash search helpers.
 _hxp_state_file() {
   emulate -L zsh
   local key; key="$(printf '%s' "$1" | sha1sum | cut -d' ' -f1)"
   print -r -- "${XDG_RUNTIME_DIR:-/tmp}/hxp/$key.state"
 }
 
-# The editor a live hxp session opened this source with, so an hxp_errs pane
-# started without HXP_EDITOR still prints the jump command that actually
-# applies. Falls back to the environment default when no session is running.
+# Use the session editor for error hints, then fall back to HXP_EDITOR.
 _hxp_session_editor() {
   emulate -L zsh
   local sf k v
@@ -104,7 +82,6 @@ _hxp_session_editor() {
   _hxp_editor
 }
 
-# Find the project-root source for tex/typ. Falls back to the file itself.
 _hxp_root_for() {
   local src="$1" ext="$2"
   case "$ext" in
@@ -140,17 +117,13 @@ _hxp_root_for() {
   esac
 }
 
-# The viewer, watcher, and error pane must agree on the root document's PDF
-# even when the editor was opened on an included source in another directory.
+# Included sources share the root PDF.
 _hxp_pdf_for() {
   emulate -L zsh
   local root_src; root_src="$(_hxp_root_for "$1" "$2")"
   print -r -- "${root_src:r}.pdf"
 }
 
-# Write a minimal starter file based on the extension. Used by hxp() when
-# the user passes a path that doesn't exist yet (nano/vim-style "editor
-# creates the file" UX).
 _hxp_scaffold() {
   local src="$1"
   local stem="${${src:t}:r}"
@@ -200,9 +173,6 @@ _hxp_scaffold() {
   esac
 }
 
-# Pick a CJK-capable font for xelatex/lualatex so Korean/Japanese/Chinese
-# glyphs in markdown render instead of disappearing. Honors $HXP_CJK_FONT,
-# otherwise probes fontconfig for the first available preferred font.
 _hxp_cjk_font() {
   emulate -L zsh
   if [[ -n "$HXP_CJK_FONT" ]]; then
@@ -227,7 +197,6 @@ _hxp_cjk_font() {
   return 1
 }
 
-# First sibling .bib in the source's directory, if any.
 _hxp_bib_for() {
   local src="$1"
   local dir="${src:h}"
@@ -237,13 +206,7 @@ _hxp_bib_for() {
   print -r -- "${bibs[1]}"
 }
 
-# True if the markdown source's YAML frontmatter declares <key>. Scoped to the
-# frontmatter block on purpose: a `bibliography:`/`geometry:` mentioned in prose
-# or inside a fenced code block must not count as the document setting it.
-# Callers use this to decide whether a document has already spoken for a
-# setting, and back off rather than fight it (e.g. declaring `bibliography:`
-# means citeproc loads the bib itself — passing --bibliography= too would load
-# it twice and duplicate every entry).
+# Only frontmatter keys override defaults; ignore matches in body text.
 _hxp_md_declares_key() {
   emulate -L zsh
   local src="$1" key="$2" awk_bin
@@ -258,16 +221,7 @@ _hxp_md_declares_key() {
   ' "$src" 2>/dev/null
 }
 
-# ---- watch scope -------------------------------------------------------
-# The live-preview watch is project-wide, not just the opened file: editing a
-# sibling \input/#include or the .bib must rebuild the root, not only saves to
-# the file you happened to open. These two helpers define what counts as a
-# "project-relevant change", shared by wpdf's watchexec and inotifywait paths
-# so the two can't drift.
-
-# Extensions (comma list, for `watchexec -e`) whose changes trigger a rebuild,
-# given the primary source's type. Includes bibliography inputs (.bib, and
-# typst's .yml/.yaml) so editing references re-renders.
+# Source and bibliography extensions for both watch backends.
 _hxp_watch_exts() {
   case "$1" in
     md)  print -r -- 'md,bib' ;;
@@ -277,14 +231,7 @@ _hxp_watch_exts() {
   esac
 }
 
-# True if a changed path should trigger a rebuild: a watched extension, and not
-# one of hxp's own transient artifacts. Every artifact we write is either
-# dot-prefixed (.<stem>.error.md, .<stem>.debug.tex, the .tmp/.errdoc files) or
-# lives inside a .hxp_build_* dir, so excluding those two classes stops the
-# markdown error doc (a .md) and the md->tex intermediate (a .tex) from
-# self-triggering a compile loop. Mirrors the `--ignore '**/.*' --ignore
-# '**/.hxp_build_*/**'` rules wpdf hands watchexec; kept in sync for the
-# inotifywait fallback which has to filter in-loop.
+# Exclude generated sources to prevent rebuild loops; match watchexec rules.
 _hxp_watch_match() {
   emulate -L zsh
   local ext="$1" path="$2" cbase="${2:t}"
@@ -294,12 +241,7 @@ _hxp_watch_match() {
   [[ "$exts" == *",${cbase:e},"* ]]
 }
 
-# No-op: both viewers handle reload natively.
-#   * zathura uses its own inotify watcher (`reload-file` / `file_changed`)
-#     and re-renders on disk change — SIGHUP is NOT a reload signal in
-#     zathura ≤ 0.5.4 (default action terminate; the process dies).
-#   * sioyek reloads via `auto_reload_preference 1` in prefs_user.config.
-# Kept as a stub so callers don't have to care which viewer they're driving.
+# Viewers reload natively; SIGHUP can terminate Zathura.
 _hxp_reload_viewer() {
   :
 }
@@ -378,13 +320,9 @@ _hxp_error_location() {
   local err_log="$1" fallback="$2" awk_bin loc file line col hint
   awk_bin="$(_hxp_awk)"
 
-  # Portable awk (POSIX 2-arg match + substr/sub — no gawk-only 3-arg match,
-  # so this works under mawk/busybox awk too). Recognises:
-  #   * latex file-line-error:  ./file.tex:NN: message      -> file + line
-  #   * typst 0.15 / rust:      ┌─ file.typ:L:C  (ends :L:C) -> file+line+col
-  #   * tex current-line marker: l.NN  (file from a prior "<*> file.tex")
+  # Parse LaTeX and Typst locations with POSIX awk.
   loc="$("$awk_bin" '
-    # latex: path/file.tex:NN:  (file + line, no column)
+    # LaTeX: file.tex:line:
     /\.tex:[0-9]+:/ {
       if (match($0, /\.tex:[0-9]+:/)) {
         f = substr($0, 1, RSTART + 3)
@@ -393,7 +331,7 @@ _hxp_error_location() {
         done = 1; exit
       }
     }
-    # typst/rust: a line ending in  <path>:<line>:<col>
+    # Typst: file.typ:line:column
     /:[0-9]+:[0-9]+[[:space:]]*$/ {
       s = $0; sub(/[[:space:]]+$/, "", s)
       c = s; sub(/^.*:/, "", c)
@@ -404,13 +342,12 @@ _hxp_error_location() {
       printf "%s\t%s\t%s\n", f, l, c
       done = 1; exit
     }
-    # tex: l.NN  (line only; filename comes from a prior "<*>" line)
+    # TeX: l.NN, using the prior <*> filename.
     /^l\.[[:space:]]*[0-9]+/ {
       n = $0; sub(/^l\.[[:space:]]*/, "", n); sub(/[^0-9].*$/, "", n)
       printf "%s\t%s\t\n", file, n
       done = 1; exit
     }
-    # tex: <*> file.tex   (filename fallback for the l.NN case)
     /^<\*>[[:space:]]+.+\.tex[[:space:]]*$/ {
       f = $0; sub(/^<\*>[[:space:]]+/, "", f); sub(/[[:space:]]+$/, "", f)
       file = f
@@ -431,9 +368,7 @@ _hxp_error_location() {
   printf '%s\t%s\t%s\n' "$file" "$line" "$col"
 }
 
-# file<TAB>line<TAB>col for the first error in the log, validated against the
-# filesystem: a location we cannot open — pandoc's already-swept temp .tex, say
-# — degrades to the source with no position rather than a bogus jump.
+# Emit file<TAB>line<TAB>col; discard locations in missing files.
 _hxp_error_pos_for() {
   emulate -L zsh
   local src="$1" err_log="$2" loc file line col
@@ -448,8 +383,6 @@ _hxp_error_pos_for() {
   fi
 }
 
-# The copy-pasteable "open the first error" command hxp_errs prints. Editor
-# shaped: `hx file:line:col` vs `micro +line:col file`.
 _hxp_editor_target_for_error() {
   emulate -L zsh
   local editor="$1" src="$2" err_log="$3" file line col
@@ -465,10 +398,7 @@ _hxp_error_extract() {
   local err_log="$1" awk_bin
   awk_bin="$(_hxp_awk)"
 
-  # Each trigger restarts the per-block budget so we don't cut off mid-error,
-  # but we cap the *total* output so cascading latex errors can't run away.
-  # The per-block window (40) is wide enough for one typst error stanza
-  # (header + ┌─ + source + caret) or one latex error with l.<n> follow-up.
+  # Cap each error block and the total extract.
   "$awk_bin" '
     BEGIN { show=0; n=0; total=0; per=40; total_max=400 }
     /^Runaway argument\?/ { show=1; n=0 }
@@ -486,10 +416,7 @@ _hxp_error_extract() {
   ' "$err_log" 2>/dev/null
 }
 
-# Approximate count of distinct compile errors in the log. Used in summaries
-# so the user knows whether to expect "fix one and recompile" or "many things
-# broke, fix in batches". Latex tends to double-emit ("! Foo" + "file:N: Foo"),
-# so we credit only one of those and accept the over/under near misses.
+# Approximate error count; avoid double-counting LaTeX diagnostics.
 _hxp_error_count() {
   emulate -L zsh
   local err_log="$1" awk_bin
@@ -569,9 +496,7 @@ _hxp_write_error_md() {
   editor_cmd="$(_hxp_editor_target_for_error "$(_hxp_session_editor "$src")" "$src" "$err_log")"
   count="$(_hxp_error_count "$err_log")"
   if [[ "$count" -gt 1 ]]; then
-    # Plain hyphen (not em-dash) so pdflatex-only setups still render this
-    # header — the error PDF must compile even when the doc-level pipeline
-    # is what put us here.
+    # ASCII hyphen keeps the header compatible with pdflatex.
     count_label="Compile failed - $count errors"
   else
     count_label="Compile failed"
@@ -668,10 +593,7 @@ _hxp_write_error_md() {
   } >| "$err_md"
 }
 
-# Render the error log into a PDF using typst itself. Lets .typ users see
-# compile errors without a latex toolchain installed. Reads the raw log via
-# typst's read() (sandboxed to the log's directory) so there's no markup to
-# escape — arbitrary compiler text can't break the error doc.
+# Render raw logs with Typst; no LaTeX dependency or markup escaping.
 _hxp_make_typst_error_pdf() {
   emulate -L zsh
   local err_log="$1" temp_pdf="$2"
@@ -705,7 +627,6 @@ _hxp_make_error_pdf() {
 
   _hxp_write_error_md "$src" "$ext" "$err_log" "$err_md" "$debug_tex"
 
-  # For typst sources, render the error PDF with typst — no latex required.
   if [[ "$ext" == "typ" ]] && _hxp_make_typst_error_pdf "$err_log" "$temp_pdf"; then
     return 0
   fi
@@ -727,36 +648,32 @@ _hxp_make_error_pdf() {
     >/dev/null 2>&1
 }
 
-# Map a tex line back to the most likely markdown line. The heuristic itself
-# lives in the shared `hxp-mdline` helper so this (the error renderer) and
-# hxp-jump (PDF inverse search) can't drift apart. Degrades to no-op if the
-# helper isn't on PATH.
 _hxp_guess_md_line_from_tex() {
   emulate -L zsh
   _hxp_need_cmd hxp-mdline || return 0
   hxp-mdline "$1" "$2" "$3"
 }
 
-# Remove a session's transient build artifacts. Never touches the rendered
-# PDF — that's the output the user wanted. Shared by hxp() cleanup and wpdf()
-# so a standalone `wpdf` doesn't leave the build dir / logs / synctex behind.
+# Remove scratch files, preserving the output PDF.
 _hxp_sweep_artifacts() {
   emulate -L zsh
   local temp_pdf="$1" err_log="$2" err_md="$3" debug_tex="$4" synctex_gz="$5" build_dir="$6"
-  rm -f -- "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" 2>/dev/null
+  rm -f -- "$temp_pdf" "${temp_pdf:r}.watch.pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" 2>/dev/null
   [[ -n "$build_dir" ]] && rm -rf -- "$build_dir" 2>/dev/null
   return 0
 }
 
-# Render one finished `typst watch` cycle. err_log is rewritten each call so it
-# never accumulates stale errors across the session. On success we just clear
-# the error markers (typst already wrote the good PDF); on failure we render an
-# error PDF over the stale-good one, matching the tex/md behaviour.
+# Publish a completed watch snapshot or render its errors.
 _hxp_typst_render_state() {
   emulate -L zsh
   local state="$1" buf="$2" src="$3" ext="$4" err_log="$5" err_md="$6" temp_pdf="$7" debug_tex="$8" pdf="$9"
+  local watch_pdf="${10:-}"
   : >| "$err_log"
   if [[ "$state" == "ok" ]]; then
+    if [[ -n "$watch_pdf" ]]; then
+      [[ -s "$watch_pdf" ]] || return 1
+      cp -f -- "$watch_pdf" "$temp_pdf" && mv -f -- "$temp_pdf" "$pdf" || return 1
+    fi
     rm -f -- "$err_md"
     return 0
   fi
@@ -768,47 +685,42 @@ _hxp_typst_render_state() {
   return 0
 }
 
-# Consume `typst watch`'s status stream (piped on stdin) and surface each
-# compile's result. typst watch keeps the PDF current on success but only
-# streams diagnostics to stderr on failure — without this, default-mode typst
-# errors never reach the error PDF or hxp_errs. We bracket cycles on the
-# "compiling ..." / "compiled ..." markers and flush once the burst goes quiet
-# (zselect distinguishes a real quiet period from EOF; zsh's `read -t` can't).
+# Publish success immediately; debounce error diagnostics with zselect.
 _hxp_typst_watch_render() {
   emulate -L zsh
   local src="$1" ext="$2" err_log="$3" err_md="$4" temp_pdf="$5" debug_tex="$6" pdf="$7"
+  local watch_pdf="${8:-}"
 
   if ! zmodload zsh/zselect 2>/dev/null; then
-    # No zselect: can't debounce safely. Fall back to just mirroring the
-    # stream into err_log (legacy behaviour) so nothing else breaks.
+    # Without zselect, preserve diagnostics only.
     cat >> "$err_log"
     return 0
   fi
 
   local line buf="" state="" to
   while true; do
-    # Poll briefly while a cycle's diagnostics are still arriving, but sleep
-    # long when idle so we're not waking every fraction of a second.
     [[ -n "$state" ]] && to=60 || to=6000
     if zselect -t "$to" -r 0; then
       IFS= read -r line || break              # fd readable but empty -> EOF
       case "$line" in
         *"] compiling "*)            buf=""; state="" ;;   # new cycle: reset
         *"compiled with errors"*)    state="fail" ;;
-        *"compiled successfully"*|*"compiled with warning"*) state="ok" ;;
+        *"compiled successfully"*|*"compiled with warning"*)
+          _hxp_typst_render_state ok "$buf" \
+            "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf" "$watch_pdf"
+          state=""; buf=""
+          ;;
         watching\ *|"writing to "*|"") ;;                  # watch chatter
         *)                           buf+="$line"$'\n' ;;  # diagnostic
       esac
     else
-      # Quiet period: the cycle is complete, render it once.
       [[ -n "$state" ]] && _hxp_typst_render_state "$state" "$buf" \
-        "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf"
+        "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf" "$watch_pdf"
       state=""; buf=""
     fi
   done
-  # EOF (typst watch exited): flush whatever the last cycle produced.
   [[ -n "$state" ]] && _hxp_typst_render_state "$state" "$buf" \
-    "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf"
+    "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf" "$watch_pdf"
   return 0
 }
 
@@ -825,7 +737,6 @@ _hxp_compile_once() {
   local ok=1
   local base="${src:t}"
 
-  # Project-aware root for tex/typ; bib auto-detection.
   local root_src; root_src="$(_hxp_root_for "$src" "$ext")"
   local root_dir="${root_src:h}"
   local root_base="${root_src:t}"
@@ -849,11 +760,7 @@ _hxp_compile_once() {
         [[ -n "$cjk_font" ]] && pdf_vars+=( -V "CJKmainfont=$cjk_font" )
       fi
 
-      # Pandoc's latex template only emits \usepackage{geometry} when a geometry
-      # variable is set, so markdown otherwise inherits article's ~1.85in
-      # margins. A bare length ("0.75in") becomes margin=<length>; anything
-      # containing "=" goes to the geometry package verbatim ("top=2cm,left=3cm").
-      # HXP_MD_MARGIN="" opts out entirely and keeps the class defaults.
+      # Normalize bare margins; empty HXP_MD_MARGIN keeps class defaults.
       local md_margin="${HXP_MD_MARGIN-0.75in}"
       if [[ -n "$md_margin" ]] && ! _hxp_md_declares_key "$src" geometry; then
         [[ "$md_margin" == *=* ]] || md_margin="margin=$md_margin"
@@ -861,11 +768,7 @@ _hxp_compile_once() {
       fi
 
       if _hxp_need_cmd latexmk; then
-        # Two-step pipeline: pandoc md→tex, then latexmk tex→pdf.
-        # The intermediate lives inside the build dir so the filename
-        # doesn't start with a dot (xelatex's openout_any=p forbids
-        # dotfiles). hxp-jump detects the .hxp.tex suffix and maps
-        # back to the original .md via the .hxp_build_ parent dir.
+        # SyncTeX needs the .hxp.tex intermediate; xelatex forbids dotfile outputs.
         mkdir -p -- "$build_dir"
         local synctex_tex="$build_dir/${stem}.hxp.tex"
         if (
@@ -906,7 +809,7 @@ _hxp_compile_once() {
           debug_tex="$synctex_tex"
         fi
       else
-        # Fallback: pandoc direct (no working synctex for inverse search).
+        # Direct Pandoc fallback has no working SyncTeX.
         local -a pdf_engine
         if _hxp_need_cmd xelatex; then
           pdf_engine=( --pdf-engine=xelatex )
@@ -934,12 +837,8 @@ _hxp_compile_once() {
       ;;
 
     typ)
-      # `typst compile` doesn't emit synctex (typst doesn't support it).
-      # Use --root so cross-file `#import`s resolve from the project root.
-      if typst compile --root "$root_dir" "$root_src" "$pdf" >"$err_log" 2>&1; then
-        rm -f -- "$err_md" "$debug_tex"
-        _hxp_reload_viewer
-        return 0
+      if typst compile --root "$root_dir" "$root_src" "$temp_pdf" >"$err_log" 2>&1; then
+        ok=0
       fi
       ;;
 
@@ -958,9 +857,7 @@ _hxp_compile_once() {
         if [[ -f "$build_dir/$root_stem.pdf" ]]; then
           mv -f -- "$build_dir/$root_stem.pdf" "$temp_pdf"
           if [[ -f "$build_dir/$root_stem.synctex.gz" ]]; then
-            # Sidecar must live next to the PDF for the viewer to find it.
-            # When the user opens an included .tex, $dir is the source's
-            # directory but the PDF lives at the project root — use ${pdf:h}.
+            # Sidecars belong beside the root PDF, even for included sources.
             cp -f -- "$build_dir/$root_stem.synctex.gz" "${pdf:h}/$root_stem.synctex.gz" 2>/dev/null
           fi
           ok=0
@@ -977,7 +874,7 @@ _hxp_compile_once() {
   if [[ $ok -eq 0 && -s "$temp_pdf" ]]; then
     mv -f -- "$temp_pdf" "$pdf"
     rm -f -- "$err_md"
-    # Keep the intermediate tex for md — synctex inverse search needs it.
+    # Retain Markdown intermediates for inverse search.
     [[ "$ext" != "md" ]] && rm -f -- "$debug_tex"
     _hxp_reload_viewer
     return 0
@@ -993,16 +890,6 @@ _hxp_compile_once() {
   return 1
 }
 
-# ---------- hxp_errs: live terminal-pane error display ----------
-# Pair this with hxp in a separate tmux pane / terminal:
-#   pane 1 (or full terminal): hxp file.tex
-#   pane 2:                    hxp_errs file.tex
-# Re-renders compile state on each save so errors land in your eye-line
-# instead of requiring a glance at the PDF viewer.
-
-# Render the current compile state (OK / ERROR + first error) into the
-# current terminal. Clears and homes the cursor first so successive renders
-# overwrite cleanly. Kept in the lib so hxp_errs can call it on each tick.
 _hxp_render_errs() {
   emulate -L zsh
   local err_log="$1" err_md="$2" src="$3"
@@ -1028,19 +915,13 @@ _hxp_render_errs() {
   loc="$(_hxp_error_location "$err_log" "$src")"
   IFS=$'\t' read -r file line col <<< "$loc"
 
-  # For markdown→pdf failures the error file is pandoc's temp .tex (already
-  # garbage-collected). Only show "at <file>:<line>" when the file is real
-  # and on disk — otherwise the line number is meaningful only inside that
-  # ghost tex, and would just confuse the user.
+  # Pandoc may reference a deleted temporary .tex file.
   if [[ -n "$line" && -f "$file" ]]; then
     printf '  %sat%s %s:%s%s\n' "$C_DIM" "$C_RST" "$file" "$line" "${col:+:$col}"
     local source_line; source_line="$(_hxp_source_line "$file" "$line")"
     [[ -n "$source_line" ]] && printf '\n  %s|%s %s\n' "$C_DIM" "$C_RST" "$source_line"
   fi
 
-  # The state file names the editor a live session actually opened this source
-  # with, so a side pane started without HXP_EDITOR still prints a usable
-  # command; _hxp_session_editor falls back to the environment default.
   local cmd
   cmd="$(_hxp_editor_target_for_error "$(_hxp_session_editor "$src")" "$src" "$err_log")"
   printf '\n  %s%s%s\n' "$C_DIM" "$cmd" "$C_RST"
@@ -1064,10 +945,7 @@ hxp_errs() {
 
   _hxp_render_errs "$err_log" "$err_md" "$src"
 
-  # Watch the source's directory for the touch-points _hxp_compile_once
-  # writes on each compile. Crucially we include `delete` — the FAIL→OK
-  # transition removes err_md *after* writing err_log, so without watching
-  # the deletion we'd render the stale ERROR state and never refresh.
+  # Watch deletions: removing err_md signals error recovery.
   local changed _drain
   inotifywait -m -q -e close_write -e moved_to -e create -e delete \
       --format '%w%f' "$dir" 2>/dev/null \
@@ -1076,18 +954,11 @@ hxp_errs() {
           "$err_log"|"$err_md"|"$pdf") ;;
           *) continue ;;
         esac
-        # Debounce: a single compile fires 5-6 events in quick succession
-        # (truncate, write, mv, rm). Drain any that arrive within 200ms of
-        # the trigger so we render the *final* state once, not each
-        # intermediate state.
+        # Drain related events before rendering the final state.
         while IFS= read -r -t 0.2 _drain 2>/dev/null; do :; done
         _hxp_render_errs "$err_log" "$err_md" "$src"
       done
 }
-
-# ---------- hxp --doctor: environment / feature diagnostics ----------
-# Probe each optional tool and report the feature it enables/disables, so the
-# many silent `command -v` fallbacks become one readable status screen.
 
 _hxp_doctor_row() {
   emulate -L zsh
@@ -1121,8 +992,6 @@ _hxp_doctor() {
   else
     _hxp_doctor_row "$editor_bin" miss "MISSING — the active editor ($editor)"
   fi
-  # Only helix and micro have argv/keystroke shapes here; anything else in
-  # HXP_EDITOR is silently treated as helix, which is worth saying out loud.
   if [[ -n "${HXP_EDITOR:-}" && "${${HXP_EDITOR:-}:l}" != (helix|hx|micro) ]]; then
     _hxp_doctor_row HXP_EDITOR opt "\"$HXP_EDITOR\" unrecognised — using helix"
   fi
@@ -1166,9 +1035,6 @@ _hxp_doctor() {
   print -r -- "${C_H}Forward search (editor -> PDF)${C_R}"
   if _hxp_need_cmd hxp-fwd; then _hxp_doctor_row hxp-fwd ok "$(command -v hxp-fwd)"
   else _hxp_doctor_row hxp-fwd opt "not on PATH — bind C-l in $editor to enable"; fi
-  # micro cannot interpolate the cursor into a keybinding, so its half of
-  # forward search is a plugin that calls hxp-fwd. Nothing to check for helix,
-  # whose `:sh` command passes the position directly.
   if [[ "$editor" == "micro" ]]; then
     local mplug="$HOME/.config/micro/plug/hxpfwd/hxpfwd.lua"
     if [[ -e "$mplug" ]]; then _hxp_doctor_row hxpfwd.lua ok "micro plugin — bind \"command:hxpfwd\""
@@ -1199,8 +1065,6 @@ _hxp_doctor() {
     else _hxp_doctor_row wmctrl opt "absent — no auto-tiling"; fi
     if _hxp_need_cmd xprop; then _hxp_doctor_row xprop ok "editor window id"
     else _hxp_doctor_row xprop opt "absent — editor id from \$WINDOWID only"; fi
-    # _hxp_wm_kind lives in hxp-main.zsh; only present once the entrypoints
-    # are sourced (always true for the real `hxp --doctor`).
     (( $+functions[_hxp_wm_kind] )) && _hxp_doctor_row wm-kind ok "$(_hxp_wm_kind)"
   fi
 

@@ -5,7 +5,7 @@ set -u
 
 repo="${0:A:h:h}"
 source "$repo/zsh/hxp-main.zsh"
-# Use this checkout even if hxp-main loaded a different installed library.
+# Use this checkout's library.
 source "$repo/zsh/hxp-lib.zsh"
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
@@ -50,7 +50,11 @@ print -r -- '  [watcher output paths]'
   }
   inotifywait() { print -r -- "$test_src" }
   typst() { print -r -- "${@[-1]}" > "$work/watch-target" }
-  _hxp_typst_watch_render() { cat >/dev/null; print -r -- "$7" > "$work/render-target" }
+  _hxp_typst_watch_render() {
+    cat >/dev/null
+    print -r -- "$7" > "$work/render-target"
+    print -r -- "$8" > "$work/render-watch-target"
+  }
 
   for ext in md tex typ; do
     test_src="$project/chapters/intro.$ext"
@@ -69,7 +73,8 @@ print -r -- '  [watcher output paths]'
     check "$ext inotify output" "$expected" "$(cat "$work/compile-targets")"
   done
   HXP_NO_NATIVE_TYP=0 wpdf -q --no-initial "$project/chapters/intro.typ"
-  check 'native typst output' "$project/main.pdf" "$(cat "$work/watch-target")"
+  check 'native typst writes a private staging PDF' "$project/chapters/.intro.tmp.watch.pdf" "$(cat "$work/watch-target")"
+  check 'native typst renderer reads the staging PDF' "$(cat "$work/watch-target")" "$(cat "$work/render-watch-target")"
   check 'native typst error output' "$project/main.pdf" "$(cat "$work/render-target")"
   exit "$fail"
 ) || fail=1
@@ -88,6 +93,14 @@ EOF
   HXP_NO_TILE=1
   HXP_WM=tiling
   check 'ownership tracking works without tiling' 0x002 "$(_hxp_wait_for_viewer_window sioyek 999 /b/main.pdf 0x001)"
+
+  cat > "$work/windows" <<'EOF'
+0x001 0 111 org.pwmt.zathura.Zathura host main.pdf
+0x002 0 222 org.pwmt.zathura.Zathura host Document title
+0x003 0 333 org.pwmt.zathura.Zathura host main.pdf
+EOF
+  check 'zathura ownership follows its process, even with a custom title' 0x002 "$(_hxp_find_viewer_window zathura 222 /b/main.pdf 0x001)"
+  check 'zathura never claims a different newly opened process' '' "$(_hxp_find_viewer_window zathura 999 /b/main.pdf $'0x001\n0x002')"
 
   wmctrl() { print -r -- "$*" >> "$work/close-actions" }
   kill() { print -r -- "kill $*" >> "$work/close-actions" }
@@ -128,7 +141,6 @@ print -r -- '  [hxp session wiring]'
       -lpx)
         print -r -- '0x001 0 111 sioyek.Sioyek host main.pdf'
         [[ -s "$work/launch-pid" ]] && print -r -- '0x002 0 111 sioyek.Sioyek host main.pdf'
-        # Another identical title appears after the editor opens.
         [[ -f "$work/session-state" ]] && print -r -- '0x003 0 111 sioyek.Sioyek host main.pdf'
         ;;
       -ic) print -r -- "$2" > "$work/closed-window" ;;
@@ -142,7 +154,43 @@ print -r -- '  [hxp session wiring]'
   check 'session initially compiles root PDF' "$project/main.pdf" "$(cat "$work/initial-pdf")"
   check 'records new window in state' viewer_windowid=0x002 "$(grep '^viewer_windowid=' "$work/session-state")"
   check 'captures viewer PID before toggle helper' "$(cat "$work/launch-pid")" "$(cat "$work/session-viewer-pid")"
+  check 'persists viewer PID separately from session PID' "viewer_pid=$(cat "$work/launch-pid")" "$(grep '^viewer_pid=' "$work/session-state")"
   check 'cleanup keeps its original window identity' 0x002 "$(cat "$work/closed-window")"
+  exit "$fail"
+) || fail=1
+
+print -r -- '  [zathura session with the same PDF already open]'
+(
+  export XDG_RUNTIME_DIR="$work/zathura-runtime" HXP_NO_TILE=1
+  _hxp_need_cmd() { return 0 }
+  _hxp_viewer() { print zathura }
+  _hxp_editor_window_id() { print 0xeee }
+  _hxp_wmctrl_tile() { return 0 }
+  _hxp_compile_once() { return 0 }
+  wpdf() { return 0 }
+  pkill() { return 0 }
+  kill() { print -r -- "$*" >> "$work/zathura-kills" }
+  zathura() {
+    zmodload zsh/system
+    print -r -- "$sysparams[pid]" > "$work/zathura-launch-pid"
+    print -r -- "$*" > "$work/zathura-launch-args"
+  }
+  wmctrl() {
+    case "$1" in
+      -l) print -r -- '0x001 0 host main.pdf' ;;
+      -lpx)
+        print -r -- '0x001 0 111 org.pwmt.zathura.Zathura host main.pdf'
+        [[ -s "$work/zathura-launch-pid" ]] && print -r -- "0x002 0 $(cat "$work/zathura-launch-pid") org.pwmt.zathura.Zathura host main.pdf"
+        ;;
+      -ic) print -r -- "$2" > "$work/zathura-closed-window" ;;
+    esac
+  }
+  _hxp_editor_open() { cp -- "$state_file" "$work/zathura-state" }
+  hxp "$project/main.tex"
+  check 'zathura launches a dedicated preview' "$project/main.pdf" "$(cat "$work/zathura-launch-args")"
+  check 'zathura records its own process' "viewer_pid=$(cat "$work/zathura-launch-pid")" "$(grep '^viewer_pid=' "$work/zathura-state")"
+  check 'zathura records its own window' viewer_windowid=0x002 "$(grep '^viewer_windowid=' "$work/zathura-state")"
+  check 'zathura cleanup closes only its own window' 0x002 "$(cat "$work/zathura-closed-window")"
   exit "$fail"
 ) || fail=1
 
@@ -195,6 +243,102 @@ print -r -- '  [simultaneous viewer launches]'
   exit "$fail"
 ) || fail=1
 
+print -r -- '  [zathura forward search process selection]'
+(
+  export XDG_RUNTIME_DIR="$work/zathura-fwd-runtime"
+  export HXP_TEST_WINDOWS="$work/zathura-fwd-windows" HXP_TEST_RAISED="$work/zathura-raised"
+  export HXP_TEST_VIEWER_ARGS="$work/zathura-fwd-args" HXP_TEST_DBUS_CALLS="$work/dbus-calls"
+  export HXP_TEST_PAGE_TARGET="$work/page-target" HXP_TEST_PDF="$project/main.pdf"
+  export HXP_TEST_VIEWER_GONE=0
+  mkdir -p "$work/bin"
+  : > "$project/main.pdf"
+  cat > "$work/bin/wmctrl" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  -lx) cat "$HXP_TEST_WINDOWS" ;;
+  -i) printf '%s\n' "$3" > "$HXP_TEST_RAISED" ;;
+esac
+EOF
+  cat > "$work/bin/zathura" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$HXP_TEST_VIEWER_ARGS"
+EOF
+  cat > "$work/bin/gdbus" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$HXP_TEST_DBUS_CALLS"
+dest=''; method=''; last="${!#}"
+while (( $# )); do
+  case "$1" in
+    --dest) dest="$2"; shift ;;
+    --method) method="$2"; shift ;;
+  esac
+  shift
+done
+if [[ "$dest" == org.pwmt.zathura.PID-222 && "$HXP_TEST_VIEWER_GONE" == 1 ]]; then
+  exit 1
+fi
+case "$method" in
+  org.freedesktop.DBus.ListNames)
+    printf "(['org.pwmt.zathura.PID-111', 'org.pwmt.zathura.PID-222'],)\n" ;;
+  org.freedesktop.DBus.Properties.Get) printf "(<'%s'>,)\n" "$HXP_TEST_PDF" ;;
+  org.pwmt.zathura.GotoPage)
+    printf '%s %s\n' "$dest" "$last" > "$HXP_TEST_PAGE_TARGET"
+    printf '(true,)\n' ;;
+esac
+EOF
+  cat > "$work/bin/pdftotext" <<'EOF'
+#!/usr/bin/env bash
+printf 'First page.\fChapter text.\f'
+EOF
+  cat > "$work/bin/hxp-typtext" <<'EOF'
+#!/usr/bin/env bash
+printf 'Chapter text.\n'
+EOF
+  chmod +x "$work/bin/wmctrl" "$work/bin/zathura" "$work/bin/gdbus" "$work/bin/pdftotext" "$work/bin/hxp-typtext"
+  export PATH="$work/bin:$PATH"
+  cat > "$HXP_TEST_WINDOWS" <<'EOF'
+0x001 0 org.pwmt.zathura.Zathura host main.pdf
+0x002 0 org.pwmt.zathura.Zathura host main.pdf
+EOF
+  sf="$(_hxp_state_file "$project/main.tex")"
+  mkdir -p "${sf:h}"
+  write_zathura_state() {
+    print -rl -- "src=$1" "pdf=$project/main.pdf" viewer=zathura "pid=$$" "viewer_windowid=$2" "viewer_pid=$3" > "$(_hxp_state_file "$1")"
+  }
+  for owned in 0x002 ''; do
+    write_zathura_state "$project/main.tex" "$owned" 222
+    rm -f -- "$HXP_TEST_VIEWER_ARGS" "$HXP_TEST_RAISED"
+    bash "$repo/bin/hxp-fwd" "$project/main.tex" 3
+    for attempt in {1..100}; do
+      [[ -s "$HXP_TEST_VIEWER_ARGS" ]] && break
+      sleep 0.01
+    done
+    check "zathura SyncTeX pins the preview process (window=$owned)" $'--synctex-pid\n222' "$(grep -A1 '^--synctex-pid$' "$HXP_TEST_VIEWER_ARGS")"
+  done
+
+  for viewer_pid in '' 0 -1 invalid; do
+    write_zathura_state "$project/main.tex" '' "$viewer_pid"
+    rm -f -- "$HXP_TEST_VIEWER_ARGS"
+    bash "$repo/bin/hxp-fwd" "$project/main.tex" 3 2> "$work/fwd-warning"
+    check "unresolved zathura process ($viewer_pid) reports failure" 1 "$?"
+    check "unresolved zathura process ($viewer_pid) never dispatches by filename" no "$([[ -e "$HXP_TEST_VIEWER_ARGS" ]] && print yes || print no)"
+  done
+
+  write_zathura_state "$project/chapters/intro.typ" '' 222
+  rm -f -- "$HXP_TEST_PAGE_TARGET" "$HXP_TEST_DBUS_CALLS" "$HXP_TEST_VIEWER_ARGS"
+  bash "$repo/bin/hxp-fwd" "$project/chapters/intro.typ" 1
+  check 'typst pages only the owned zathura, even without X11' 'org.pwmt.zathura.PID-222 1' "$(cat "$HXP_TEST_PAGE_TARGET" 2>/dev/null)"
+  check 'owned typst search never enumerates other zathura processes' '' "$(grep 'ListNames' "$HXP_TEST_DBUS_CALLS")"
+
+  export HXP_TEST_VIEWER_GONE=1
+  rm -f -- "$HXP_TEST_PAGE_TARGET" "$HXP_TEST_VIEWER_ARGS"
+  bash "$repo/bin/hxp-fwd" "$project/chapters/intro.typ" 1 2> "$work/fwd-warning"
+  check 'missing preview reports failure' 1 "$?"
+  check 'missing preview never pages the external copy' no "$([[ -e "$HXP_TEST_PAGE_TARGET" ]] && print yes || print no)"
+  check 'missing preview never spawns an untracked window' no "$([[ -e "$HXP_TEST_VIEWER_ARGS" ]] && print yes || print no)"
+  exit "$fail"
+) || fail=1
+
 print -r -- '  [forward search window selection]'
 (
   export XDG_RUNTIME_DIR="$work/fwd-runtime"
@@ -228,7 +372,6 @@ EOF
     } > "$sf"
     rm -f -- "$HXP_TEST_RAISED" "$HXP_TEST_VIEWER_ARGS"
     bash "$repo/bin/hxp-fwd" "$project/main.tex" 3
-    # hxp-fwd deliberately launches the viewer asynchronously.
     for attempt in {1..100}; do
       [[ -s "$HXP_TEST_VIEWER_ARGS" ]] && break
       sleep 0.01

@@ -1,6 +1,5 @@
 #!/usr/bin/env zsh
-# Thin wrapper so watchexec can drive _hxp_compile_once without re-sourcing
-# the entire .zshrc on every save.
+# Compile without loading .zshrc.
 emulate -L zsh
 source "${HOME}/.zsh/hxp-lib.zsh"
 _hxp_compile_once "$@"
