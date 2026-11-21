@@ -19,6 +19,7 @@ jobs:
           zsh -n zsh/hxp-lib.zsh
           zsh -n zsh/hxp-main.zsh
           zsh -n bin/hxp-compile
+          zsh -n bin/hxp-first-error
 
       - name: bash syntax check
         run: |

@@ -84,13 +84,20 @@ pid_alive() {
   kill -0 "$1" 2>/dev/null
 }
 
-read_state() {
+# Forget a session's editor and preview targets.
+clear_targets() {
   tmux_socket=""
   tmux_pane=""
   window_id=""
+  ghostty_split=""
+  state_viewer=""
+  state_editor=""
+}
+
+read_state() {
+  clear_targets
   state_pid=""
   state_src=""
-  state_editor=""
   [[ -r "$1" ]] || return 1
   while IFS='=' read -r k v; do
     case "$k" in
@@ -98,6 +105,8 @@ read_state() {
       tmux)      tmux_socket="$v" ;;
       tmux_pane) tmux_pane="$v" ;;
       windowid)  window_id="$v" ;;
+      ghostty_split) ghostty_split="$v" ;;
+      viewer)    state_viewer="$v" ;;
       editor)    state_editor="$v" ;;
       pid)       state_pid="$v" ;;
     esac
@@ -108,7 +117,7 @@ read_state "$state_file"
 
 if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
   rm -f -- "$state_file" "$state_file.buf" 2>/dev/null || true
-  tmux_socket=""; tmux_pane=""; window_id=""; state_editor=""
+  clear_targets
 fi
 
 # Included sources may belong to a session higher in the directory tree.
@@ -118,11 +127,11 @@ if [[ -z "$tmux_pane" && -z "$window_id" ]]; then
     [[ -r "$sf" && "$sf" != "$state_file" ]] || continue
     read_state "$sf"
     if [[ -z "$state_src" ]]; then
-      tmux_socket=""; tmux_pane=""; window_id=""; state_editor=""; continue
+      clear_targets; continue
     fi
     if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
       rm -f -- "$sf" "$sf.buf" 2>/dev/null || true
-      tmux_socket=""; tmux_pane=""; window_id=""; state_editor=""; continue
+      clear_targets; continue
     fi
     sf_dir="$(dirname "$(realpath -m -- "$state_src" 2>/dev/null || printf '%s' "$state_src")")"
     case "$reported_dir" in
@@ -131,7 +140,7 @@ if [[ -z "$tmux_pane" && -z "$window_id" ]]; then
         state_file="$sf"
         break ;;
     esac
-    tmux_socket=""; tmux_pane=""; window_id=""; state_editor=""
+    clear_targets
   done
 fi
 
@@ -198,9 +207,17 @@ if [[ -n "$window_id" ]] && command -v xdotool >/dev/null 2>&1; then
   xdotool windowactivate --sync "$window_id" 2>/dev/null || true
   sleep 0.05
 
-  xkey() { xdotool key --window "$window_id" "$@" 2>/dev/null; }
-  # Release modifiers held during the PDF click before typing.
-  xtype() { xdotool type --window "$window_id" --clearmodifiers --delay 0 "$1" 2>/dev/null; }
+  if [[ "$ghostty_split" == 1 ]]; then
+    # Recheck focus before each keystroke to avoid typing in another window.
+    active_editor_window() { [[ "$(xdotool getactivewindow)" == "$window_id" ]]; }
+    xkey() { active_editor_window && xdotool key --clearmodifiers "$@"; }
+    xtype() { active_editor_window && xdotool type --clearmodifiers --delay 0 "$1"; }
+    xkey ctrl+shift+h || exit 1
+    sleep 0.05
+  else
+    xkey() { xdotool key --window "$window_id" "$@" 2>/dev/null; }
+    xtype() { xdotool type --window "$window_id" --clearmodifiers --delay 0 "$1" 2>/dev/null; }
+  fi
 
   case "$editor" in
     micro)
@@ -222,6 +239,12 @@ if [[ -n "$window_id" ]] && command -v xdotool >/dev/null 2>&1; then
       xtype ":open $target_str" && xkey Return && exit 0
       ;;
   esac
+fi
+
+# fancy-cat runs this helper inside the preview; a new editor would land there.
+if [[ "$state_viewer" == fancy-cat ]]; then
+  printf 'hxp-jump: could not reach the session editor\n' >&2
+  exit 1
 fi
 
 spawn_editor "$realfile" "$line" "$col"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: hxp-typtext <typ-file> <line>
+# Usage: hxp-typtext <typ-file> <line> [--context]
 # Print searchable prose candidates, longest first.
 
 set -u
@@ -70,7 +70,11 @@ emit_candidates() {
 for off in 0 1 -1 2 -2 3 -3 4 -4; do
   probe=$(( typ_line + off ))
   (( probe < 1 || probe > typ_total )) && continue
-  emit_candidates "$probe"
+  if [[ "${3:-}" == --context ]]; then
+    emit_candidates "$probe" | awk -v off="$off" 'NR <= 12 { print off "\t" $0 }'
+  else
+    emit_candidates "$probe"
+  fi
 done
 
 exit 0

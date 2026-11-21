@@ -1,0 +1,18 @@
+#!/usr/bin/env zsh
+# Print the first error as file:line:column for the editor.
+emulate -L zsh
+source "${0:A:h:h}/zsh/hxp-lib.zsh" || exit 1
+src="${1:-${HXP_SESSION_SRC:-}}"
+[[ -f "$src" ]] || { print -u2 -- 'usage: hxp-first-error [session-source]'; exit 2; }
+src="${src:A}"
+base="${src:h}/.${src:t:r}.error"
+[[ -f "$base.md" ]] || { print -u2 -- 'No current build error'; exit 1; }
+IFS=$'\t' read -r file line col <<< "$(_hxp_error_pos_for "$src" "$base.log")"
+[[ -n "$line" ]] || { print -u2 -- 'Compiler reported no source location'; exit 1; }
+if [[ "$src" == *.md && "$file" == *.hxp.tex ]]; then
+  mapped="$(_hxp_guess_md_line_from_tex "$src" "$file" "$line")"
+  # Never open the generated TeX; a bare path opens the Markdown source.
+  if [[ -z "$mapped" ]]; then print -r -- "$src"; exit 0; fi
+  file="$src"; line="$mapped"; col=1
+fi
+printf '%s:%s:%s\n' "$file" "$line" "${col:-1}"

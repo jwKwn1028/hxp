@@ -2,6 +2,135 @@
 
 [[ -r "$HOME/.zsh/hxp-lib.zsh" ]] && source "$HOME/.zsh/hxp-lib.zsh"
 
+# The new Ghostty shell claims its window’s pending preview.
+_hxp_claim_split() {
+  emulate -L zsh
+  [[ -o interactive && -z "$TMUX" && "$TERM_PROGRAM" == ghostty &&
+     "$WINDOWID" == <-> && -n "$GHOSTTY_SURFACE_ID" ]] || return 0
+  local root="${XDG_RUNTIME_DIR:-/tmp}/hxp-preview-$UID"
+  [[ -L "$root/window-$WINDOWID" && -O "$root" && ! -L "$root" &&
+     "$(stat -c %a -- "$root")" == 700 ]] || return 0
+  local session
+  session="$(readlink -- "$root/window-$WINDOWID" 2>/dev/null)" || return 0
+  [[ "${session:h}" == "$root" && -O "$session" && -r "$session/source-surface" ]] || return 0
+  [[ "$(<"$session/source-surface")" != "$GHOSTTY_SURFACE_ID" ]] || return 0
+  local owner="$(<"$session/owner")"
+  [[ "$owner" == <-> ]] && kill -0 "$owner" 2>/dev/null || return 0
+  ln -- "$session/owner" "$session/claimed" 2>/dev/null || return 0
+  local pdf="$(<"$session/pdf")"
+  # Exit the shell normally so Ghostty closes the split when the viewer is killed.
+  (
+    zmodload zsh/system
+    print -r -- "$sysparams[pid]" > "$session/pid"
+    exec fancy-cat --listen "$session/socket" --inverse-search hxp-jump "$pdf"
+  )
+  exit 0
+}
+_hxp_claim_split
+
+# Print a process's start time, which tells a reused PID apart.
+_hxp_proc_start() {
+  emulate -L zsh
+  [[ "$1" == <-> && -r "/proc/$1/stat" ]] || return 1
+  local stat; stat="$(<"/proc/$1/stat")" || return 1
+  stat="${stat##*) }"                   # fields after "pid (comm) "
+  print -r -- "${${(s: :)stat}[20]}"
+}
+
+# Ghostty runs each split's shell as its own direct child.
+_hxp_ghostty_pid() {
+  emulate -L zsh
+  local pid=$$ stat
+  while (( pid > 1 )) && [[ -r "/proc/$pid/stat" ]]; do
+    if [[ "$(<"/proc/$pid/comm")" == ghostty ]]; then print -r -- "$pid"; return 0; fi
+    stat="$(<"/proc/$pid/stat")"
+    stat="${stat##*) }"
+    pid="${${(s: :)stat}[2]}"
+  done
+  return 1
+}
+
+# Print pid:start of the one new shell that Ghostty opened in this window.
+_hxp_new_split_shell() {
+  emulate -L zsh
+  local term_pid="$1" before="$2" child env found=""
+  for child in ${(f)"$(pgrep -P "$term_pid" 2>/dev/null)"}; do
+    [[ " $before " == *" $child "* ]] && continue
+    env=$'\n'"$(tr '\0' '\n' < "/proc/$child/environ" 2>/dev/null)"$'\n'
+    [[ "$env" == *$'\nWINDOWID='"$WINDOWID"$'\n'* ]] || continue
+    [[ "$env" == *$'\nGHOSTTY_SURFACE_ID='"$GHOSTTY_SURFACE_ID"$'\n'* ]] && continue
+    [[ -z "$found" ]] || return 1        # ambiguous; never guess
+    found="$child"
+  done
+  [[ -n "$found" ]] || return 1
+  local start; start="$(_hxp_proc_start "$found")" || return 1
+  print -r -- "$found:$start"
+}
+
+_hxp_release_split() {
+  emulate -L zsh
+  [[ -n "$preview_dir" ]] || return 0
+  if [[ -n "$preview_pane" ]]; then
+    tmux kill-pane -t "$preview_pane" 2>/dev/null
+  else
+    local pid="" shell_pid="${preview_shell%%:*}"
+    [[ -r "$preview_dir/pid" ]] && pid="$(<"$preview_dir/pid")"
+    if [[ "$pid" == <-> && -r "/proc/$pid/cmdline" ]] &&
+       grep -Fzxq -- "$preview_dir/socket" "/proc/$pid/cmdline"; then
+      kill -TERM "$pid" 2>/dev/null
+    elif [[ -n "$shell_pid" && "$(_hxp_proc_start "$shell_pid")" == "${preview_shell#*:}" ]]; then
+      # fancy-cat never started; hang up the split's shell so Ghostty closes it.
+      pkill -HUP -P "$shell_pid" 2>/dev/null
+      kill -HUP "$shell_pid" 2>/dev/null
+    fi
+  fi
+  rm -rf -- "$preview_dir"
+  preview_dir=''; preview_pane=''; preview_shell=''
+}
+
+_hxp_start_split() {
+  emulate -L zsh
+  local root="${XDG_RUNTIME_DIR:-/tmp}/hxp-preview-$UID"
+  mkdir -m 700 -- "$root" 2>/dev/null || [[ -d "$root" ]] || return 1
+  [[ -O "$root" && ! -L "$root" && "$(stat -c %a -- "$root")" == 700 ]] || return 1
+  preview_dir="$(mktemp -d "$root/session.XXXXXXXX")" || return 1
+  local win_request="" lockfd="" term_pid="" before_shells="" i
+  {
+    if [[ -n "$TMUX" ]]; then
+      preview_pane="$(tmux split-window -hdP -F '#{pane_id}' -t "$TMUX_PANE" -c "$PWD" \
+        fancy-cat --listen "$preview_dir/socket" --inverse-search hxp-jump "$pdf")" || return 1
+    else
+      [[ "$(xdotool getactivewindow)" == "$WINDOWID" ]] || return 1
+      print -r -- "$GHOSTTY_SURFACE_ID" > "$preview_dir/source-surface"
+      print -r -- "$pdf" > "$preview_dir/pdf"
+      print -r -- "$$" > "$preview_dir/owner"
+      zmodload zsh/system || return 1
+      : >> "$root/window-$WINDOWID.lock" || return 1
+      zsystem flock -t 0 -f lockfd "$root/window-$WINDOWID.lock" || return 1
+      ln -sfT -- "$preview_dir" "$root/window-$WINDOWID" || return 1
+      win_request="$root/window-$WINDOWID"
+      # Note existing shells so a split that never starts fancy-cat can be closed.
+      term_pid="$(_hxp_ghostty_pid)" && before_shells="$(pgrep -P "$term_pid" | tr '\n' ' ')"
+      xdotool key --clearmodifiers ctrl+shift+o || return 1
+    fi
+    for i in {1..160}; do
+      [[ -S "$preview_dir/socket" ]] && break
+      if [[ -n "$term_pid" && -z "$preview_shell" ]]; then
+        preview_shell="$(_hxp_new_split_shell "$term_pid" "$before_shells")"
+      fi
+      sleep 0.05
+    done
+    [[ -S "$preview_dir/socket" ]] || return 1
+    if [[ -n "$win_request" && "$(xdotool getactivewindow)" == "$WINDOWID" ]]; then
+      xdotool key --clearmodifiers ctrl+shift+h
+    fi
+    return 0
+  } always {
+    [[ -n "$win_request" ]] && rm -f -- "$win_request"
+    [[ -n "$lockfd" ]] && zsystem flock -u "$lockfd"
+  }
+}
+
 _hxp_active_window_id() {
   emulate -L zsh
   command -v xprop >/dev/null 2>&1 || return 1
@@ -172,6 +301,7 @@ wpdf() {
   local quiet=0 no_initial=0
   while [[ "$1" == -* ]]; do
     case "$1" in
+      --keep-last-good) local -x HXP_KEEP_LAST_GOOD=1; shift ;;
       -q|--quiet)   quiet=1; shift ;;
       --no-initial) no_initial=1; shift ;;   # caller (hxp) already did it
       --) shift; break ;;
@@ -180,7 +310,7 @@ wpdf() {
   done
 
   local src="$1"
-  [[ -z "$src" ]] && { print -u2 -- "usage: wpdf [-q] [--no-initial] <file.{md,tex,typ}>"; return 2; }
+  [[ -z "$src" ]] && { print -u2 -- "usage: wpdf [-q] [--no-initial] [--keep-last-good] <file.{md,tex,typ}>"; return 2; }
   [[ ! -f "$src" ]] && { print -u2 -- "wpdf: not found: $src"; return 2; }
 
   _hxp_need_cmd inotifywait || { print -u2 -- "wpdf: missing inotifywait (install inotify-tools)"; return 2; }
@@ -222,7 +352,7 @@ wpdf() {
 
     # Publish snapshots atomically; retain watch output for error recovery.
     local watch_pdf="${temp_pdf:r}.watch.pdf"
-    typst watch --root "$root_dir" "$root_src" "$watch_pdf" 2>&1 \
+    (cd -- "$root_dir" && typst watch --root "$root_dir" "$root_src" "$watch_pdf") 2>&1 \
       | _hxp_typst_watch_render "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf" "$watch_pdf"
     _hxp_sweep_artifacts "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" "$build_dir"
     return
@@ -289,6 +419,7 @@ hxp() {
   while [[ "$1" == -* ]]; do
     case "$1" in
       --doctor)  _hxp_doctor; return 0 ;;
+      --keep-last-good) local -x HXP_KEEP_LAST_GOOD=1; shift ;;
       --micro)   HXP_EDITOR=micro; shift ;;
       --helix)   HXP_EDITOR=helix; shift ;;
       --)        shift; break ;;
@@ -307,7 +438,7 @@ hxp() {
   _hxp_need_cmd "$editor_bin" || { print -u2 "hxp: missing editor: $editor_bin"; return 2; }
 
   local src="$1"
-  [[ -z "$src" ]] && { print -u2 "usage: hxp [--micro|--helix] <file.{md,tex,typ}>  |  hxp --doctor"; return 2; }
+  [[ -z "$src" ]] && { print -u2 "usage: hxp [--micro|--helix] [--keep-last-good] <file.{md,tex,typ}>  |  hxp --doctor"; return 2; }
 
   if [[ ! -f "$src" ]]; then
     case "${${src:t}:e}" in
@@ -337,7 +468,9 @@ hxp() {
   # Capture the editor window before focus changes.
   local editor_wid; editor_wid="$(_hxp_editor_window_id)"
 
-  local viewer; viewer="$(_hxp_viewer)"
+  local -x HXP_SESSION_SRC="$src"
+  local viewer; viewer="$(_hxp_viewer)" || { print -u2 -- "hxp: no usable PDF viewer"; return 2; }
+  local preview_dir="" preview_pane="" preview_shell=""
 
   # Search helpers use this session state to find the editor and viewer.
   local state_file; state_file="$(_hxp_state_file "$src")"
@@ -345,7 +478,6 @@ hxp() {
   {
     print -r -- "src=$src"
     print -r -- "pdf=$pdf"
-    print -r -- "viewer=$viewer"
     print -r -- "editor=$editor"
     print -r -- "tmux=$TMUX"
     print -r -- "tmux_pane=$TMUX_PANE"
@@ -359,15 +491,34 @@ hxp() {
     initial_ok=1
   fi
 
-  if [[ -n "$editor_wid" ]]; then
-    _hxp_wmctrl_tile "$editor_wid" left id
-  else
-    _hxp_wmctrl_tile :ACTIVE: left
+  if [[ "$viewer" == fancy-cat ]]; then
+    if _hxp_start_split; then
+      print -r -- "viewer_socket=$preview_dir/socket" >> "$state_file"
+      [[ -z "$TMUX" ]] && print -r -- "ghostty_split=1" >> "$state_file"
+    else
+      _hxp_release_split
+      viewer="$(_hxp_gui_viewer)" || {
+        print -u2 -- 'hxp: could not start fancy-cat in a right split and no fallback viewer is installed'
+        _hxp_sweep_artifacts "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" "$build_dir"
+        rm -f -- "$state_file"
+        return 2
+      }
+      print -u2 -- "hxp: could not start fancy-cat in a right split; using $viewer"
+    fi
+  fi
+  print -r -- "viewer=$viewer" >> "$state_file"
+
+  if [[ "$viewer" != fancy-cat ]]; then
+    if [[ -n "$editor_wid" ]]; then
+      _hxp_wmctrl_tile "$editor_wid" left id
+    else
+      _hxp_wmctrl_tile :ACTIVE: left
+    fi
   fi
 
   local before_windows="" viewer_wid="" zpid="" track_window=0 launch_lockfd=""
   local launch_lock="${state_file:h}/viewer-launch.lock"
-  if command -v wmctrl >/dev/null 2>&1 && wmctrl -l >/dev/null 2>&1; then
+  if [[ "$viewer" != fancy-cat ]] && command -v wmctrl >/dev/null 2>&1 && wmctrl -l >/dev/null 2>&1; then
     # Serialize launches so sessions cannot claim each other's windows.
     if zmodload zsh/system 2>/dev/null &&
         : >> "$launch_lock" &&
@@ -391,7 +542,7 @@ hxp() {
         zpid=$!
         { sleep 0.5 && sioyek --execute-command toggle_synctex --nofocus; } >/dev/null 2>&1 &!
         ;;
-      zathura|*) zathura "$pdf" >/dev/null 2>&1 &!; zpid=$! ;;
+      zathura) zathura "$pdf" >/dev/null 2>&1 &!; zpid=$! ;;
     esac
     if (( track_window )); then
       viewer_wid="$(_hxp_wait_for_viewer_window "$viewer" "$zpid" "$pdf" "$before_windows")"
@@ -411,7 +562,11 @@ hxp() {
   cleanup() {
     [[ -n "$wpid" ]] && { pkill -TERM -P "$wpid" 2>/dev/null; kill -TERM "$wpid" 2>/dev/null; }
 
-    _hxp_close_viewer "$viewer" "$zpid" "$viewer_wid"
+    if [[ "$viewer" == fancy-cat ]]; then
+      _hxp_release_split
+    else
+      _hxp_close_viewer "$viewer" "$zpid" "$viewer_wid"
+    fi
 
     # Remove scratch files; keep the rendered PDF.
     rm -f -- "$temp_pdf" "${temp_pdf:r}.watch.pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_tex" "$synctex_gz" 2>/dev/null
@@ -422,7 +577,7 @@ hxp() {
   trap 'cleanup; return 130' INT
   trap 'cleanup; return 143' TERM HUP
 
-  if [[ -n "$editor_wid" && "$HXP_NO_TILE" != "1" ]] && command -v wmctrl >/dev/null 2>&1; then
+  if [[ "$viewer" != fancy-cat && -n "$editor_wid" && "$HXP_NO_TILE" != "1" ]] && command -v wmctrl >/dev/null 2>&1; then
     wmctrl -ia "$editor_wid" >/dev/null 2>&1
   fi
 

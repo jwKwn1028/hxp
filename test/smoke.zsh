@@ -22,6 +22,7 @@ is_pdf() { [[ -s "$1" ]] && head -c5 -- "$1" 2>/dev/null | grep -q '%PDF' }
 
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
+export XDG_RUNTIME_DIR="$work/runtime"   # keep error-page markers private
 
 compile() {  # src ext
   local src="$1" ext="$2" dir="${1:h}" stem="${${1:t}:r}"
@@ -42,6 +43,15 @@ if _hxp_need_cmd pandoc; then
   compile "$d/a.md" md; rc=$?
   check "md bad rc"        1 "$rc"
   check "md bad error pdf" 1 "$(is_pdf "$d/a.pdf" && echo 1 || echo 0)"
+
+  if _hxp_need_cmd latexmk; then
+    # TeX wraps its log at 79 columns by default; a deep path would split.
+    d="$work/md/deep-$(printf '%080d' 0)"; mkdir -p "$d"
+    print -rl -- '# Bad' '' 'text \undefinedcontrolsequence more' >| "$d/a.md"
+    compile "$d/a.md" md
+    first="$("$repo/bin/hxp-first-error" "$d/a.md" 2>&1)"
+    check 'md first error stays in the Markdown source' "$d/a.md" "${first%%:*}"
+  fi
 else
   skips+=(markdown)
 fi
@@ -88,10 +98,31 @@ if _hxp_need_cmd typst; then
   check 'typ keeps an open reader stable' "$old_digest" "$(sha256sum <&$reader_fd)"
   exec {reader_fd}<&-
 
+  good="$(sha256sum < "$d/a.pdf")"
   print -rl -- '= Bad' '#let x =' >| "$d/a.typ"
+  HXP_KEEP_LAST_GOOD=1 compile "$d/a.typ" typ
+  check 'last-good reports a failed compile' 1 "$?"
+  check 'last-good preserves the PDF' "$good" "$(sha256sum < "$d/a.pdf")"
+  check 'editor command resolves the first error' "$d/a.typ:2:8" "$(HXP_SESSION_SRC="$d/a.typ" "$repo/bin/hxp-first-error")"
   compile "$d/a.typ" typ; rc=$?
   check "typ bad rc"        1 "$rc"
   check "typ bad error pdf" 1 "$(is_pdf "$d/a.pdf" && echo 1 || echo 0)"
+
+  # Until a build succeeds, last-good mode keeps the error page current.
+  d="$work/typ first failure"; mkdir -p "$d"
+  print -rl -- '= Bad' '#let x =' >| "$d/a.typ"
+  HXP_KEEP_LAST_GOOD=1 compile "$d/a.typ" typ
+  check 'last-good without a PDF renders an error page' 1 "$(is_pdf "$d/a.pdf" && echo 1 || echo 0)"
+  first_error="$(sha256sum < "$d/a.pdf")"
+  print -rl -- '= Bad' '' '' '#let y =' >| "$d/a.typ"
+  HXP_KEEP_LAST_GOOD=1 compile "$d/a.typ" typ
+  check 'last-good refreshes an earlier error page' yes "$([[ "$(sha256sum < "$d/a.pdf")" != "$first_error" ]] && print yes)"
+  print -rl -- '= Fixed' 'Good.' >| "$d/a.typ"
+  compile "$d/a.typ" typ
+  good="$(sha256sum < "$d/a.pdf")"
+  print -rl -- '= Bad' '#let z =' >| "$d/a.typ"
+  HXP_KEEP_LAST_GOOD=1 compile "$d/a.typ" typ
+  check 'last-good keeps the first good build' "$good" "$(sha256sum < "$d/a.pdf")"
 
   d="$work/typ project"; mkdir -p "$d/chapters"
   print -rl -- '= Root' '#include "chapters/intro.typ"' >| "$d/main.typ"
@@ -140,7 +171,7 @@ if _hxp_need_cmd typst; then
     (
       source "$repo/zsh/hxp-main.zsh"
       source "$repo/zsh/hxp-lib.zsh"
-      export HXP_NO_NATIVE_TYP=0
+      export HXP_NO_NATIVE_TYP=0 HXP_KEEP_LAST_GOOD=1
       live_dir="$work/live-watch"
       mkdir -p "$live_dir"
       live_src="$live_dir/live.typ"
@@ -168,11 +199,13 @@ if _hxp_need_cmd typst; then
         check 'native watch preserves an external reader' "$old_digest" "$(sha256sum <&$reader_fd)"
         exec {reader_fd}<&-
 
+        good="$(sha256sum < "$live_pdf")"
         print -rl -- '= Broken' '#let x =' > "$live_src"
         for attempt in {1..200}; do
           [[ -s "$live_error" ]] && break
           sleep 0.05
         done
+        check 'native last-good preserves the PDF' "$good" "$(sha256sum < "$live_pdf")"
         check 'native watch reports an error' yes "$([[ -s "$live_error" ]] && print yes)"
         print -rl -- '= Updated' 'Next stable snapshot.' > "$live_src"
         for attempt in {1..200}; do

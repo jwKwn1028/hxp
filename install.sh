@@ -19,13 +19,14 @@ Dependencies (install via your package manager):
     xelatex              Unicode-capable PDF engine (texlive-xetex)
     latexmk              .tex compile driver
     typst                .typ compiler
-    sioyek or zathura    PDF viewer with reverse-search support
+    fancy-cat            preferred PDF viewer (fork with --listen and --remote)
+    zathura or sioyek    fallback PDF viewer
     wmctrl, xprop        X11 tiling; wmctrl also focuses the viewer for
                          forward search (both no-op on Wayland)
 
   Inverse search (PDF -> editor), optional:
     tmux                 in-place jumps into the running editor's pane
-    xdotool              X11 keystroke fallback when not in tmux
+    xdotool              native Ghostty split, focus, and X11 editor keystrokes
 
   Forward search (editor -> PDF), optional:
     pdftotext            typst text-search fallback (poppler-utils)
@@ -72,6 +73,7 @@ echo "Linking hxp from $repo into $HOME …"
 link "$repo/zsh/hxp-main.zsh"             "$HOME/.zsh/hxp-main.zsh"
 link "$repo/zsh/hxp-lib.zsh"              "$HOME/.zsh/hxp-lib.zsh"
 link "$repo/bin/hxp-compile"              "$HOME/.local/bin/hxp-compile"
+link "$repo/bin/hxp-first-error"          "$HOME/.local/bin/hxp-first-error"
 link "$repo/bin/hxp-jump"                 "$HOME/.local/bin/hxp-jump"
 link "$repo/bin/hxp-mdline"               "$HOME/.local/bin/hxp-mdline"
 link "$repo/bin/hxp-fwd"                  "$HOME/.local/bin/hxp-fwd"
@@ -100,13 +102,21 @@ Done. Final step (one-time):
   helix — ~/.config/helix/config.toml:
 
       [keys.normal]
+      F8 = ":open %sh{hxp-first-error}"
       "C-l" = ":sh hxp-fwd '%{buffer_name}' %{cursor_line} %{cursor_column}"
 
   micro — ~/.config/micro/bindings.json (the hxpfwd command comes from the
   plugin linked above; this replaces micro's default `goto ` prefill on
   Ctrl-l, which stays available as Ctrl-e goto):
 
+      "F8": "command:hxperror",
       "Ctrl-l": "command:hxpfwd"
+
+  ghostty (native X11 split) — ~/.config/ghostty/config. Ctrl+Shift+O is
+  Ghostty's default right split; hxp also needs this non-default binding to
+  return focus to the editor:
+
+      keybind = ctrl+shift+h=goto_split:left
 
 EOF
 

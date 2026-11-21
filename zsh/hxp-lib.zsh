@@ -9,11 +9,42 @@ _hxp_awk() {
   if _hxp_need_cmd gawk; then print -r -- gawk; else print -r -- awk; fi
 }
 
-_hxp_viewer() {
-  if [[ -n "$HXP_VIEWER" ]]; then print -r -- "$HXP_VIEWER"; return; fi
-  if _hxp_need_cmd sioyek; then print -r -- sioyek
-  else print -r -- zathura
+_hxp_gui_viewer() {
+  local candidate
+  for candidate in "${HXP_VIEWER:-}" zathura sioyek; do
+    [[ "$candidate" == (zathura|sioyek) ]] || continue
+    if _hxp_need_cmd "$candidate"; then print -r -- "$candidate"; return 0; fi
+  done
+  return 1
+}
+
+# Succeed when a fancy-cat split can open; otherwise print why not.
+_hxp_split_check() {
+  emulate -L zsh
+  local why=""
+  if [[ "${HXP_NO_SPLIT:-}" == 1 ]]; then why='disabled by HXP_NO_SPLIT=1'
+  elif ! _hxp_need_cmd fancy-cat; then why='not installed'
+  elif ! fancy-cat --help 2>&1 | grep -q -- '--listen'; then
+    why='this build lacks --listen; install the fork'
+  elif [[ -n "$TMUX" ]]; then
+    if [[ -z "$TMUX_PANE" ]]; then why='tmux did not set TMUX_PANE'
+    elif ! fancy-cat --tmux-supported >/dev/null 2>&1; then
+      why='this tmux cannot pass graphics through'
+    fi
+  elif [[ "$TERM_PROGRAM" != ghostty ]]; then why='needs Ghostty or tmux'
+  elif [[ "$WINDOWID" != <-> || -z "$DISPLAY" ]]; then
+    why='Ghostty splits need X11 (WINDOWID and DISPLAY)'
+  elif [[ -z "$GHOSTTY_SURFACE_ID" ]]; then why='Ghostty did not set GHOSTTY_SURFACE_ID'
+  elif ! _hxp_need_cmd xdotool; then why='Ghostty splits need xdotool'
   fi
+  [[ -z "$why" ]] && return 0
+  print -r -- "$why"
+  return 1
+}
+
+_hxp_viewer() {
+  if _hxp_split_check >/dev/null; then print -r -- fancy-cat; return 0; fi
+  _hxp_gui_viewer
 }
 
 _hxp_editor() {
@@ -256,26 +287,20 @@ _hxp_extract_line() {
 
 _hxp_resolve_error_file() {
   emulate -L zsh
-  local fallback="$1" file="$2" candidate
+  local fallback="$1" file="$2" candidate root
 
   if [[ -z "$file" ]]; then
     print -r -- "$fallback"
     return
   fi
 
-  if [[ -f "$file" ]]; then
-    print -r -- "${file:A}"
-    return
-  fi
-
   if [[ "$file" != /* && -n "$fallback" ]]; then
-    candidate="${fallback:h}/$file"
-    if [[ -f "$candidate" ]]; then
-      print -r -- "${candidate:A}"
-      return
-    fi
+    root="$(_hxp_root_for "$fallback" "${fallback:e}")"
+    for candidate in "${root:h}/$file" "${fallback:h}/$file"; do
+      if [[ -f "$candidate" ]]; then print -r -- "${candidate:A}"; return; fi
+    done
   fi
-
+  if [[ -f "$file" ]]; then print -r -- "${file:A}"; return; fi
   print -r -- "$file"
 }
 
@@ -321,7 +346,7 @@ _hxp_error_location() {
   awk_bin="$(_hxp_awk)"
 
   # Parse LaTeX and Typst locations with POSIX awk.
-  loc="$("$awk_bin" '
+  loc="$("$awk_bin" -v fallback="$fallback" '
     # LaTeX: file.tex:line:
     /\.tex:[0-9]+:/ {
       if (match($0, /\.tex:[0-9]+:/)) {
@@ -338,14 +363,15 @@ _hxp_error_location() {
       sub(/:[0-9]+$/, "", s)
       l = s; sub(/^.*:/, "", l)
       sub(/:[0-9]+$/, "", s)
-      f = s; sub(/^.*[[:space:]]/, "", f)
+      f = s; sub(/^[[:space:]]*/, "", f)
+      sub(/^(┌─|-->)[[:space:]]*/, "", f)
       printf "%s\t%s\t%s\n", f, l, c
       done = 1; exit
     }
     # TeX: l.NN, using the prior <*> filename.
     /^l\.[[:space:]]*[0-9]+/ {
       n = $0; sub(/^l\.[[:space:]]*/, "", n); sub(/[^0-9].*$/, "", n)
-      printf "%s\t%s\t\n", file, n
+      printf "%s\t%s\t\n", (file == "" ? fallback : file), n
       done = 1; exit
     }
     /^<\*>[[:space:]]+.+\.tex[[:space:]]*$/ {
@@ -482,6 +508,19 @@ _hxp_source_context() {
   '
 }
 
+# Hard-wrap lines by characters, as TeX wraps its own log.
+_hxp_fold() {
+  emulate -L zsh
+  local width="$1" line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    while (( ${#line} > width )); do
+      print -r -- "${line[1,width]}"
+      line="${line[width+1,-1]}"
+    done
+    print -r -- "$line"
+  done
+}
+
 _hxp_write_error_md() {
   local src="$1" ext="$2" err_log="$3" err_md="$4" debug_tex="$5"
   local loc loc_file line col location extract primary source_line editor_cmd count count_label
@@ -551,11 +590,12 @@ _hxp_write_error_md() {
 
     echo "## Compiler Extract"
     echo '```'
+    # TeX logs are unwrapped for parsing; wrap them to fit the page.
     if [[ -n "$extract" ]]; then
       print -r -- "$extract"
     else
       tail -n 80 "$err_log"
-    fi
+    fi | _hxp_fold 79
     echo '```'
 
     if [[ "$ext" == "md" ]]; then
@@ -621,11 +661,47 @@ _hxp_make_typst_error_pdf() {
   return $rc
 }
 
+# Record each published error page by file identity, outside the project.
+_hxp_error_pdf_marker() {
+  emulate -L zsh
+  local state; state="$(_hxp_state_file "$1")"
+  print -r -- "${state:r}.errpdf"
+}
+
+_hxp_pdf_identity() { stat -c '%d:%i:%s:%y' -- "$1" 2>/dev/null }
+
+_hxp_publish_error_pdf() {
+  emulate -L zsh
+  local temp_pdf="$1" pdf="$2" marker
+  mv -f -- "$temp_pdf" "$pdf" || return 1
+  marker="$(_hxp_error_pdf_marker "$pdf")"
+  mkdir -p -- "${marker:h}" 2>/dev/null
+  _hxp_pdf_identity "$pdf" >| "$marker" 2>/dev/null
+  return 0
+}
+
+# A rebuilt PDF has a new identity, so a stale marker never matches it.
+_hxp_is_error_pdf() {
+  emulate -L zsh
+  local marker id
+  marker="$(_hxp_error_pdf_marker "$1")"
+  id="$(_hxp_pdf_identity "$1")"
+  [[ -n "$id" && -r "$marker" && "$(<"$marker")" == "$id" ]]
+}
+
+_hxp_forget_error_pdf() { rm -f -- "$(_hxp_error_pdf_marker "$1")" 2>/dev/null; return 0 }
+
 _hxp_make_error_pdf() {
   local src="$1" ext="$2" err_log="$3" err_md="$4" temp_pdf="$5" debug_tex="$6"
+  local pdf="$7"
   local -a pdf_engine
 
   _hxp_write_error_md "$src" "$ext" "$err_log" "$err_md" "$debug_tex"
+
+  # Keep a good PDF, but refresh an error page so it shows the latest failure.
+  if [[ "${HXP_KEEP_LAST_GOOD:-}" == 1 && -s "$pdf" ]] && ! _hxp_is_error_pdf "$pdf"; then
+    return 1
+  fi
 
   if [[ "$ext" == "typ" ]] && _hxp_make_typst_error_pdf "$err_log" "$temp_pdf"; then
     return 0
@@ -674,12 +750,13 @@ _hxp_typst_render_state() {
       [[ -s "$watch_pdf" ]] || return 1
       cp -f -- "$watch_pdf" "$temp_pdf" && mv -f -- "$temp_pdf" "$pdf" || return 1
     fi
+    _hxp_forget_error_pdf "$pdf"
     rm -f -- "$err_md"
     return 0
   fi
   print -rn -- "$buf" >> "$err_log"
-  if _hxp_make_error_pdf "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex"; then
-    [[ -s "$temp_pdf" ]] && mv -f -- "$temp_pdf" "$pdf"
+  if _hxp_make_error_pdf "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf"; then
+    [[ -s "$temp_pdf" ]] && _hxp_publish_error_pdf "$temp_pdf" "$pdf"
   fi
   rm -f -- "$temp_pdf"
   return 0
@@ -787,9 +864,10 @@ _hxp_compile_once() {
             latexmk_engine=( -pdf )
           fi
 
+          # The intermediate's absolute path must not wrap in the log.
           if (
             cd -- "$dir" &&
-            latexmk "${latexmk_engine[@]}" -synctex=1 \
+            max_print_line=10000 latexmk "${latexmk_engine[@]}" -synctex=1 \
                 -interaction=nonstopmode -halt-on-error -file-line-error \
                 -outdir="$build_dir" -auxdir="$build_dir" \
                 "$synctex_tex" >>"$err_log" 2>&1
@@ -837,7 +915,7 @@ _hxp_compile_once() {
       ;;
 
     typ)
-      if typst compile --root "$root_dir" "$root_src" "$temp_pdf" >"$err_log" 2>&1; then
+      if (cd -- "$root_dir" && typst compile --root "$root_dir" "$root_src" "$temp_pdf") >"$err_log" 2>&1; then
         ok=0
       fi
       ;;
@@ -846,9 +924,10 @@ _hxp_compile_once() {
       mkdir -p -- "$build_dir"
       local -a bib_args
       [[ -n "$bib" ]] && bib_args=( -bibtex )
+      # Long paths must not wrap in the log.
       if (
         cd -- "$root_dir" &&
-        latexmk -pdf -synctex=1 -interaction=nonstopmode -halt-on-error \
+        max_print_line=10000 latexmk -pdf -synctex=1 -interaction=nonstopmode -halt-on-error \
           -file-line-error \
           "${bib_args[@]}" \
           -outdir="$build_dir" -auxdir="$build_dir" \
@@ -873,6 +952,7 @@ _hxp_compile_once() {
 
   if [[ $ok -eq 0 && -s "$temp_pdf" ]]; then
     mv -f -- "$temp_pdf" "$pdf"
+    _hxp_forget_error_pdf "$pdf"
     rm -f -- "$err_md"
     # Retain Markdown intermediates for inverse search.
     [[ "$ext" != "md" ]] && rm -f -- "$debug_tex"
@@ -880,9 +960,9 @@ _hxp_compile_once() {
     return 0
   fi
 
-  if _hxp_make_error_pdf "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex"; then
+  if _hxp_make_error_pdf "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf"; then
     if [[ -s "$temp_pdf" ]]; then
-      mv -f -- "$temp_pdf" "$pdf"
+      _hxp_publish_error_pdf "$temp_pdf" "$pdf"
       _hxp_reload_viewer
     fi
   fi
@@ -1009,8 +1089,11 @@ _hxp_doctor() {
   print
   print -r -- "${C_H}Viewer${C_R}"
   viewer="$(_hxp_viewer)"
-  if _hxp_need_cmd "$viewer"; then _hxp_doctor_row "$viewer" ok "active viewer"
-  else _hxp_doctor_row "$viewer" miss "selected but not installed"; fi
+  if [[ -n "$viewer" ]]; then _hxp_doctor_row "$viewer" ok "active viewer"
+  else _hxp_doctor_row viewer miss "no usable fancy-cat split, Zathura, or Sioyek"; fi
+  if [[ "$viewer" != fancy-cat ]]; then
+    _hxp_doctor_row fancy-cat opt "split unavailable: $(_hxp_split_check)"
+  fi
 
   print
   print -r -- "${C_H}Watch / reload${C_R}"

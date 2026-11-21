@@ -1,8 +1,7 @@
 # hxp
 
-Personal live PDF preview for **Markdown, LaTeX, and Typst**. Edit in Helix or
-Micro; saves recompile the PDF in Zathura or Sioyek. Compile errors appear in
-the preview.
+Edit **Markdown, LaTeX, and Typst** in Helix or Micro. On save, fancy-cat updates
+the preview in a right-hand Ghostty or tmux split. Fallbacks are Zathura, then Sioyek.
 
 [Manual](manual.md) · [PDF manual](manual.pdf)
 
@@ -12,6 +11,9 @@ the preview.
 git clone https://github.com/jwKwn1028/hxp.git ~/Applications/hxp
 ~/Applications/hxp/install.sh
 ```
+
+Rerun `install.sh` after updating hxp to pick up new helper symlinks. In the
+chezmoi setup, `chezmoi apply` installs the Helix and Micro F8 bindings.
 
 Add to `~/.zshrc`, ensure `~/.local/bin` is on `PATH`, and reload:
 
@@ -31,5 +33,5 @@ wpdf notes.md           # watch only
 hxp_errs paper.tex      # live errors in another pane
 ```
 
-Use **tmux** for PDF-to-editor jumps into the running editor. Bind a key for
-[editor-to-PDF search](manual.md#forward-search-editor--pdf).
+Ctrl+click typeset text to jump to its source with SyncTeX. For the reverse
+direction, bind an [editor-to-PDF search key](manual.md#forward-search-editor--pdf).

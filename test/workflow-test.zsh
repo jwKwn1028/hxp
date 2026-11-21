@@ -79,6 +79,98 @@ print -r -- '  [watcher output paths]'
   exit "$fail"
 ) || fail=1
 
+print -r -- '  [preview selection]'
+(
+  export TMUX='' TMUX_PANE='' TERM_PROGRAM=ghostty WINDOWID=42 DISPLAY=:1 GHOSTTY_SURFACE_ID=test
+  export HXP_VIEWER=sioyek
+  local installed=' fancy-cat zathura sioyek xdotool ' passthrough=1
+  _hxp_need_cmd() { [[ "$installed" == *" $1 "* ]] }
+  fancy-cat() {
+    case "$1" in
+      --help) print -r -- '--listen SOCKET' ;;
+      --tmux-supported) (( passthrough )) ;;
+    esac
+  }
+  check 'native split outranks the GUI preference' fancy-cat "$(_hxp_viewer)"
+  check 'HXP_NO_SPLIT=1 keeps the GUI viewer' sioyek "$(HXP_NO_SPLIT=1 _hxp_viewer)"
+  check 'split check explains the opt-out' 'disabled by HXP_NO_SPLIT=1' "$(HXP_NO_SPLIT=1 _hxp_split_check)"
+  installed=' fancy-cat zathura sioyek '
+  check 'split check names a missing xdotool' 'Ghostty splits need xdotool' "$(_hxp_split_check)"
+  installed=' fancy-cat zathura sioyek xdotool '
+  TMUX=test TMUX_PANE=%1
+  check 'graphics-capable tmux gets a split' fancy-cat "$(_hxp_viewer)"
+  passthrough=0
+  check 'unsupported tmux honors GUI fallback preference' sioyek "$(_hxp_viewer)"
+  unset HXP_VIEWER
+  installed=' zathura sioyek '
+  check 'Zathura is the default GUI fallback' zathura "$(_hxp_viewer)"
+  installed=' sioyek '
+  check 'Sioyek alone remains usable' sioyek "$(_hxp_viewer)"
+  installed=' '
+  _hxp_viewer >/dev/null
+  check 'no available viewer reports failure' 1 "$?"
+  exit "$fail"
+) || fail=1
+
+print -r -- '  [error page folding]'
+check 'folds long log lines' $'abcd\nefgh\nij\nkl' "$(print -rl -- abcdefghij kl | _hxp_fold 4)"
+
+print -r -- '  [unclaimed Ghostty split]'
+(
+  export WINDOWID=42 GHOSTTY_SURFACE_ID=editor
+  zmodload zsh/system
+  term_pid=$sysparams[pid]
+  before="$(pgrep -P "$term_pid" | tr '\n' ' ')"
+  env WINDOWID=7 GHOSTTY_SURFACE_ID=elsewhere sleep 10 & other_window=$!
+  env WINDOWID=42 GHOSTTY_SURFACE_ID=editor sleep 10 & same_surface=$!
+  env WINDOWID=42 GHOSTTY_SURFACE_ID=split sleep 10 & split=$!
+  preview_shell=''
+  for attempt in {1..100}; do
+    preview_shell="$(_hxp_new_split_shell "$term_pid" "$before")" && break
+    sleep 0.02
+  done
+  check 'finds only the new split in this window' "$split" "${preview_shell%%:*}"
+  preview_dir="$work/unclaimed-preview" preview_pane=''
+  mkdir -p "$preview_dir"
+  _hxp_release_split
+  wait "$split"
+  check 'hangs up a split that never started fancy-cat' 129 "$?"
+  check 'removes the preview directory' no "$([[ -e "$work/unclaimed-preview" ]] && print yes || print no)"
+  preview_dir="$work/reused-preview" preview_shell="$other_window:0"
+  mkdir -p "$preview_dir"
+  _hxp_release_split
+  check 'never signals a reused PID' alive "$(kill -0 "$other_window" 2>/dev/null && print alive || print gone)"
+  kill "$other_window" "$same_surface" 2>/dev/null
+  exit "$fail"
+) || fail=1
+
+print -r -- '  [inverse search from fancy-cat]'
+(
+  export XDG_RUNTIME_DIR="$work/jump-runtime" HXP_TEST_SPAWNED="$work/spawned-editor"
+  mkdir -p "$work/jump-bin"
+  cat > "$work/jump-bin/hx" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$HXP_TEST_SPAWNED"
+EOF
+  chmod +x "$work/jump-bin/hx"
+  export PATH="$work/jump-bin:$PATH"
+  sf="$(_hxp_state_file "${project:A}/main.tex")"
+  mkdir -p "${sf:h}"
+  for viewer in fancy-cat zathura; do
+    print -rl -- "src=$project/main.tex" "pdf=$project/main.pdf" "viewer=$viewer" editor=helix "pid=$$" > "$sf"
+    rm -f -- "$HXP_TEST_SPAWNED"
+    bash "$repo/bin/hxp-jump" "$project/main.tex:3" 2>/dev/null
+    rc=$?
+    if [[ "$viewer" == fancy-cat ]]; then
+      check 'unreachable editor reports failure inside fancy-cat' 1 "$rc"
+      check 'fancy-cat never gets a second editor' no "$([[ -e "$HXP_TEST_SPAWNED" ]] && print yes || print no)"
+    else
+      check 'GUI viewers still fall back to a new editor' "${project:A}/main.tex:3" "$(cat "$HXP_TEST_SPAWNED" 2>/dev/null)"
+    fi
+  done
+  exit "$fail"
+) || fail=1
+
 print -r -- '  [viewer ownership]'
 (
   wmctrl() { cat "$work/windows" }
@@ -288,13 +380,11 @@ esac
 EOF
   cat > "$work/bin/pdftotext" <<'EOF'
 #!/usr/bin/env bash
-printf 'First page.\fChapter text.\f'
+printf 'Chapter text. First page.\fChapter text. Distinct context.\f'
 EOF
-  cat > "$work/bin/hxp-typtext" <<'EOF'
-#!/usr/bin/env bash
-printf 'Chapter text.\n'
-EOF
-  chmod +x "$work/bin/wmctrl" "$work/bin/zathura" "$work/bin/gdbus" "$work/bin/pdftotext" "$work/bin/hxp-typtext"
+  ln -s "$repo/bin/hxp-typtext" "$work/bin/hxp-typtext"
+  print -rl -- 'Chapter text.' 'Distinct context.' > "$project/chapters/intro.typ"
+  chmod +x "$work/bin/wmctrl" "$work/bin/zathura" "$work/bin/gdbus" "$work/bin/pdftotext"
   export PATH="$work/bin:$PATH"
   cat > "$HXP_TEST_WINDOWS" <<'EOF'
 0x001 0 org.pwmt.zathura.Zathura host main.pdf
@@ -327,7 +417,7 @@ EOF
   write_zathura_state "$project/chapters/intro.typ" '' 222
   rm -f -- "$HXP_TEST_PAGE_TARGET" "$HXP_TEST_DBUS_CALLS" "$HXP_TEST_VIEWER_ARGS"
   bash "$repo/bin/hxp-fwd" "$project/chapters/intro.typ" 1
-  check 'typst pages only the owned zathura, even without X11' 'org.pwmt.zathura.PID-222 1' "$(cat "$HXP_TEST_PAGE_TARGET" 2>/dev/null)"
+  check 'neighboring text selects the second occurrence in the owned Zathura' 'org.pwmt.zathura.PID-222 1' "$(cat "$HXP_TEST_PAGE_TARGET" 2>/dev/null)"
   check 'owned typst search never enumerates other zathura processes' '' "$(grep 'ListNames' "$HXP_TEST_DBUS_CALLS")"
 
   export HXP_TEST_VIEWER_GONE=1
