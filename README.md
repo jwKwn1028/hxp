@@ -12,8 +12,10 @@ git clone https://github.com/jwKwn1028/hxp.git ~/Applications/hxp
 ~/Applications/hxp/install.sh
 ```
 
-Rerun `install.sh` after updating hxp to pick up new helper symlinks. In the
-chezmoi setup, `chezmoi apply` installs the Helix and Micro F8 bindings.
+Rerun `install.sh` after updating hxp to pick up new helper symlinks;
+`--no-config` leaves the Zathura and Sioyek configs to your dotfiles. In the
+chezmoi setup, `chezmoi apply` clones hxp at a pinned commit, runs
+`install.sh --no-config`, and installs the Helix and Micro F8 bindings.
 
 Add to `~/.zshrc`, ensure `~/.local/bin` is on `PATH`, and reload:
 

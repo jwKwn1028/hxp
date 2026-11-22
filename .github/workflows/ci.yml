@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install lint tools
-        run: sudo apt-get update && sudo apt-get install -y zsh shellcheck gawk mawk lua5.4
+        run: sudo apt-get update && sudo apt-get install -y zsh tmux shellcheck gawk mawk lua5.4
 
       - name: zsh syntax check
         run: |
@@ -23,12 +23,13 @@ jobs:
 
       - name: bash syntax check
         run: |
-          for f in bin/hxp-jump bin/hxp-mdline bin/hxp-fwd bin/hxp-texline bin/hxp-typtext bin/hxp-dual-panelify install.sh; do
+          for f in bin/hxp-jump bin/hxp-mdline bin/hxp-fwd bin/hxp-texline bin/hxp-typtext bin/hxp-dual-panelify bin/hxp-sessions install.sh; do
             bash -n "$f"
           done
+          sh -n bin/hxp-resume
 
       - name: shellcheck
-        run: shellcheck -S warning bin/hxp-jump bin/hxp-mdline bin/hxp-fwd bin/hxp-texline bin/hxp-typtext bin/hxp-dual-panelify install.sh
+        run: shellcheck -S warning bin/hxp-jump bin/hxp-mdline bin/hxp-fwd bin/hxp-texline bin/hxp-typtext bin/hxp-dual-panelify bin/hxp-sessions bin/hxp-resume install.sh test/sessions-test.sh test/resume-test.sh
 
       # micro loads this at startup; a syntax error there costs micro users
       # forward search with no other signal than the command going missing.
@@ -40,6 +41,12 @@ jobs:
 
       - name: workflow regressions (mock viewers and watchers)
         run: zsh test/workflow-test.zsh
+
+      - name: session listing (hxp-sessions)
+        run: bash test/sessions-test.sh
+
+      - name: tmux restore (hxp-resume, private tmux server)
+        run: bash test/resume-test.sh
 
   smoke:
     runs-on: ubuntu-latest

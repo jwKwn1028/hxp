@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Usage: hxp-sessions
+# List live hxp sessions, one per line, tab-separated:
+#   TMUX_SOCKET  TMUX_PANE  EDITOR  VIEWER  VIEWER_SOCKET  SOURCE
+# The tmux fields are empty outside tmux, VIEWER_SOCKET unless VIEWER is
+# fancy-cat. A session is live while the shell that ran hxp is (same PID and
+# start time) and, for fancy-cat, its socket exists. Fields never hold tabs.
+# Read-only: hxp-jump clears stale state files.
+
+set -u
+
+# Start time in clock ticks: tells a reused PID apart.
+proc_start() {
+  local stat
+  [[ -r "/proc/$1/stat" ]] || return 1
+  stat="$(<"/proc/$1/stat")" || return 1
+  stat="${stat##*) }"            # fields after "pid (comm) "
+  # shellcheck disable=SC2086  # split the stat fields
+  set -- $stat
+  printf '%s\n' "${20}"
+}
+
+tab=$'\t'
+for sf in "${XDG_RUNTIME_DIR:-/tmp}/hxp"/*.state; do
+  [[ -r "$sf" ]] || continue
+  src="" editor="" viewer="" tmux_socket="" tmux_pane="" viewer_socket="" pid="" pid_start=""
+  while IFS='=' read -r k v; do
+    case "$k" in
+      src)           src="$v" ;;
+      editor)        editor="$v" ;;
+      viewer)        viewer="$v" ;;
+      tmux)          tmux_socket="${v%%,*}" ;;   # $TMUX is socket,server-pid,session
+      tmux_pane)     tmux_pane="$v" ;;
+      viewer_socket) viewer_socket="$v" ;;
+      pid)           pid="$v" ;;
+      pid_start)     pid_start="$v" ;;
+    esac
+  done <"$sf"
+
+  [[ -n "$src" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || continue
+  if [[ -n "$pid_start" ]] && started="$(proc_start "$pid")" && [[ "$started" != "$pid_start" ]]; then
+    continue
+  fi
+  if [[ "$viewer" == fancy-cat ]]; then
+    [[ -S "$viewer_socket" ]] || continue
+  else
+    viewer_socket=""
+  fi
+
+  line="$tmux_socket$tab$tmux_pane$tab$editor$tab$viewer$tab$viewer_socket$tab$src"
+  tabs="${line//[^$tab]/}"
+  (( ${#tabs} == 5 )) && printf '%s\n' "$line"
+done
+exit 0

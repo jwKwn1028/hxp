@@ -6,8 +6,9 @@ fancy-cat. Saves rebuild the PDF and compile failures appear as error PDFs.
 ## Setup
 
 Follow the [installation steps](README.md#install). The installer links the shell
-functions, helpers, viewer configs, and Micro plugin. Rerunning it after an update
-creates missing links, including `~/.local/bin/hxp-first-error` and
+functions, helpers, viewer configs, and Micro plugin; `--no-config` skips the
+Zathura and Sioyek configs for dotfiles that own them. Rerunning it after an
+update creates missing links, including `~/.local/bin/hxp-first-error` and
 `~/.config/micro/plug/hxpfwd`. The chezmoi-managed editor configs supply the
 F8 bindings. The installer backs up existing regular files
 as `*.bak.<timestamp>`. Run `./install.sh --deps` for dependencies or
@@ -227,6 +228,17 @@ tools, place windows manually; tmux inverse search still works.
 
 Scratch files left after a crash can be deleted; the next session recreates them.
 
+## tmux restore
+
+`hxp-sessions` lists live sessions, one per line, tab-separated:
+`TMUX_SOCKET TMUX_PANE EDITOR VIEWER VIEWER_SOCKET SOURCE`. A tmux-resurrect
+save hook saves each session's editor pane as a shell and its fancy-cat pane as
+`hxp-resume PANE_INDEX EDITOR SOURCE`; add `hxp-resume` to `@resurrect-processes`.
+On restore it waits while the server option `@resurrect-restoring` is 1 and for
+a Ghostty client, then restarts the editor pane running hxp once its shell is
+idle. While it waits, its pane option `@hxp-resume` holds
+`EDITOR_PANE_ID EDITOR SOURCE`, so a save can write the editor's current index.
+
 ## Troubleshooting
 
 Start with `hxp --doctor`.
@@ -250,15 +262,18 @@ Start with `hxp --doctor`.
 zsh test/parse-test.zsh
 zsh test/workflow-test.zsh
 zsh test/smoke.zsh
+bash test/sessions-test.sh
+bash test/resume-test.sh   # needs tmux
 ```
 
-Parser and workflow tests need no compilers or GUI. Smoke tests compile each
-available language and exercise native Typst watch. CI runs all three.
+Parser, workflow, and session tests need no compilers or GUI. Smoke tests
+compile each available language and exercise native Typst watch. CI runs them all.
 
 `zsh/hxp-main.zsh` owns sessions and windows; `zsh/hxp-lib.zsh` handles builds,
 errors, and diagnostics. `bin/hxp-compile` serves the watcher; `hxp-jump` and
 `hxp-fwd` handle search, using `hxp-mdline`, `hxp-texline`, and `hxp-typtext`.
-Micro's adapter is in `config/micro/plug/hxpfwd/`.
+`hxp-sessions` and `hxp-resume` serve tmux restore. Micro's adapter is in
+`config/micro/plug/hxpfwd/`.
 
 ## Uninstall
 
@@ -269,7 +284,7 @@ rm -f ~/.zsh/hxp-main.zsh ~/.zsh/hxp-lib.zsh \
       ~/.local/bin/hxp-compile ~/.local/bin/hxp-first-error ~/.local/bin/hxp-jump \
       ~/.local/bin/hxp-mdline ~/.local/bin/hxp-fwd \
       ~/.local/bin/hxp-texline ~/.local/bin/hxp-typtext \
-      ~/.local/bin/hxp-dual-panelify \
+      ~/.local/bin/hxp-dual-panelify ~/.local/bin/hxp-sessions ~/.local/bin/hxp-resume \
       ~/.config/zathura/zathurarc \
       ~/.config/sioyek/prefs_user.config ~/.config/sioyek/keys_user.config \
       ~/.config/micro/plug/hxpfwd

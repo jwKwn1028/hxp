@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install symlinks; back up existing files. --deps prints dependencies.
+# Install symlinks; back up existing files. --deps prints dependencies;
+# --no-config leaves the Zathura and Sioyek configs to your dotfiles.
 
 set -euo pipefail
 
@@ -40,10 +41,14 @@ Dependencies (install via your package manager):
 EOF
 }
 
-if [[ "${1:-}" == "--deps" || "${1:-}" == "-d" ]]; then
-  print_deps
-  exit 0
-fi
+config=1
+for arg in "$@"; do
+  case "$arg" in
+    --deps | -d) print_deps; exit 0 ;;
+    --no-config) config=0 ;;
+    *) echo "usage: install.sh [--deps] [--no-config]" >&2; exit 2 ;;
+  esac
+done
 
 repo="$(cd -- "$(dirname -- "$0")" && pwd)"
 ts="$(date +%Y%m%d-%H%M%S)"
@@ -80,10 +85,17 @@ link "$repo/bin/hxp-fwd"                  "$HOME/.local/bin/hxp-fwd"
 link "$repo/bin/hxp-texline"              "$HOME/.local/bin/hxp-texline"
 link "$repo/bin/hxp-typtext"              "$HOME/.local/bin/hxp-typtext"
 link "$repo/bin/hxp-dual-panelify"        "$HOME/.local/bin/hxp-dual-panelify"
-link "$repo/config/zathura/zathurarc"     "$HOME/.config/zathura/zathurarc"
-link "$repo/config/sioyek/prefs_user.config" "$HOME/.config/sioyek/prefs_user.config"
-link "$repo/config/sioyek/keys_user.config" "$HOME/.config/sioyek/keys_user.config"
+link "$repo/bin/hxp-sessions"             "$HOME/.local/bin/hxp-sessions"
+link "$repo/bin/hxp-resume"               "$HOME/.local/bin/hxp-resume"
+# The Micro plugin is code the editor bindings call, not preference.
 link "$repo/config/micro/plug/hxpfwd"     "$HOME/.config/micro/plug/hxpfwd"
+if (( config )); then
+  link "$repo/config/zathura/zathurarc"   "$HOME/.config/zathura/zathurarc"
+  link "$repo/config/sioyek/prefs_user.config" "$HOME/.config/sioyek/prefs_user.config"
+  link "$repo/config/sioyek/keys_user.config" "$HOME/.config/sioyek/keys_user.config"
+else
+  echo "  [skip]   Zathura and Sioyek configs (--no-config)"
+fi
 
 cat <<'EOF'
 

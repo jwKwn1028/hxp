@@ -1,0 +1,91 @@
+#!/bin/sh
+# hxp-resume PANE_INDEX helix|micro SOURCE: reopen hxp in its saved editor pane.
+# A tmux saver records this in the viewer pane of a session from hxp-sessions,
+# with the editor pane saved as a shell. While it waits, @hxp-resume on this
+# pane holds "EDITOR_PANE_ID EDITOR SOURCE", so a save can write the editor's
+# current index. It waits while the server option @resurrect-restoring is 1.
+set -eu
+
+if [ "$#" -ne 3 ] || [ -z "${TMUX_PANE:-}" ]; then
+    echo 'usage: hxp-resume PANE_INDEX helix|micro SOURCE  (inside tmux)' >&2
+    exit 2
+fi
+index=$1 editor=$2 src=$3
+case $index in '' | *[!0-9]*) echo "hxp-resume: bad pane index: $index" >&2; exit 2 ;; esac
+case $editor in helix | micro) ;; *) echo "hxp-resume: unknown editor: $editor" >&2; exit 2 ;; esac
+case $src in *'
+'* | *'	'*) echo 'hxp-resume: the source path has a tab or newline' >&2; exit 2 ;; esac
+if [ ! -f "$src" ]; then
+    printf "hxp-resume: '%s' not found\n" "$src" >&2
+    exit 1
+fi
+
+# Pin the editor before pane indices change.
+self=$TMUX_PANE
+pane=$(tmux display -p -t "$(tmux display -p -t "$self" '#{window_id}').$index" '#{pane_id}')
+if [ "$pane" = "$self" ]; then
+    echo 'hxp-resume: the editor pane is this pane' >&2
+    exit 1
+fi
+shell=$(tmux display -p -t "$pane" '#{pane_pid}')
+born=$(ps -o lstart= -p "$shell") || { echo 'hxp-resume: the editor pane has no shell' >&2; exit 1; }
+
+# Saves resolve this pane ID to the editor's current index.
+tmux set -p -t "$self" @hxp-resume "$pane $editor $src"
+trap 'tmux set -pu -t "$self" @hxp-resume 2>/dev/null || :' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
+# Require the original foreground shell with no children.
+# Foreground groups alone miss editors run with job control off.
+idle() {
+    [ "$(tmux display -p -t "$pane" '#{pane_pid}' 2>/dev/null)" = "$shell" ] || return 1
+    [ "$(ps -o lstart= -p "$shell" 2>/dev/null)" = "$born" ] || return 1
+    # shellcheck disable=SC2046  # pgid, tpgid and command name are single words
+    set -- $(ps -o pgid= -o tpgid= -o comm= -p "$shell" 2>/dev/null)
+    [ "$#" -eq 3 ] && [ "$1" = "$2" ] || return 1
+    name=${3##*/}
+    case ${name#-} in sh | dash | bash | zsh | fish) ;; *) return 1 ;; esac
+    ! pgrep -P "$shell" >/dev/null 2>&1
+}
+
+# Wait before changing pane indices.
+tries=0
+while [ "$(tmux show -sqv @resurrect-restoring)" = 1 ] && [ "$tries" -lt 600 ]; do
+    tries=$((tries + 1))
+    sleep 0.2
+done
+
+# Fancy-cat needs an attached Ghostty client.
+if command -v fancy-cat >/dev/null 2>&1 && [ -z "${SSH_CONNECTION:-}" ]; then
+    waiting=
+    until fancy-cat --tmux-supported >/dev/null 2>&1; do
+        if [ -z "$waiting" ]; then
+            printf 'hxp-resume: waiting for a Ghostty client to reopen %s\n' "${src##*/}"
+            waiting=1
+        fi
+        sleep 0.5
+    done
+fi
+
+# Allow brief prompt redraws before treating the shell as busy.
+tries=0
+until idle; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 20 ]; then
+        printf 'hxp-resume: the editor pane is busy; run hxp %s there to reopen it\n' "$src" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+# Respawn to avoid sending keys into Helix command mode.
+start=$(tmux show -gqv default-command)
+set -- set -pu -t "$self" @hxp-resume \; \
+    respawn-pane -k -t "$pane" -c "$(tmux display -p -t "$pane" '#{pane_current_path}')" \
+    -e "HXP_RESUME=$src" -e "HXP_RESUME_EDITOR=$editor"
+if [ -n "$start" ]; then
+    set -- "$@" "$start"
+else
+    set -- "$@" -- "$(tmux show -gqv default-shell)" -l
+fi
+exec tmux "$@" \; kill-pane -t "$self"

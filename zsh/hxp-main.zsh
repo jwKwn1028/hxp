@@ -483,6 +483,7 @@ hxp() {
     print -r -- "tmux_pane=$TMUX_PANE"
     print -r -- "windowid=$editor_wid"
     print -r -- "pid=$$"
+    print -r -- "pid_start=$(_hxp_proc_start $$)"
   } >| "$state_file" 2>/dev/null
 
   local initial_ok=0
@@ -599,3 +600,21 @@ hxp() {
   cleanup
   trap - INT TERM HUP
 }
+
+# hxp-resume respawns a restored editor pane with HXP_RESUME set; reopen that
+# session once, at the first prompt, after every startup file has loaded.
+if [[ -o interactive && -n ${HXP_RESUME-} ]]; then
+  typeset -ga _hxp_resume=(--helix -- "$HXP_RESUME")
+  [[ ${HXP_RESUME_EDITOR-} == micro ]] && _hxp_resume[1]=--micro
+  unset HXP_RESUME HXP_RESUME_EDITOR
+  _hxp_resume_run() {
+    add-zsh-hook -d precmd _hxp_resume_run
+    local -a args=("${_hxp_resume[@]}")
+    unset _hxp_resume
+    (( $+functions[hxp] )) || return 0
+    print -rs -- hxp "${(q-)args[@]}"
+    hxp "${args[@]}"
+  }
+  autoload -Uz add-zsh-hook
+  add-zsh-hook precmd _hxp_resume_run
+fi
