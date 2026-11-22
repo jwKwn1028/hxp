@@ -84,9 +84,12 @@ cat >"$tmp/home/.zshrc" <<EOF
 source '$HOOK'
 hxp() { print -r -- "\$*" >>'$tmp/hxp'; print -rl -- "\${(v)history[@]}" >'$tmp/history'; }
 EOF
+# -d skips the system zshrc: Ubuntu's runs compinit, which stops at a question
+# when a completion directory is writable by others, before the first prompt.
 t -f /dev/null new-session -d -s z -x 120 -y 30 -e "HXP_RESUME=$src" -e HXP_RESUME_EDITOR=micro \
-    "env HOME='$tmp/home' ZDOTDIR='$tmp/home' zsh -i"
-wait_for '[ -s "$tmp/hxp" ]' || fail 'zsh did not run hxp'
+    "env HOME='$tmp/home' ZDOTDIR='$tmp/home' zsh -d -i"
+wait_for '[ -s "$tmp/hxp" ]' || fail "zsh did not run hxp; its pane shows:
+$(t capture-pane -p -t z)"
 t send-keys -t z 'true' Enter
 sleep 0.3
 [ "$(cat "$tmp/hxp")" = "--micro -- $src" ] || fail "hxp ran as: $(cat "$tmp/hxp")"
