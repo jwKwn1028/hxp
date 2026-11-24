@@ -69,6 +69,105 @@ class SessionRoutingTests(unittest.TestCase):
         self.assertEqual(set(self.sent_panes()), {"%2"})
 
 
+class ReloadNotificationTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="hxp-reload-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.pdf = self.root / "source.pdf"
+        self.pdf.write_text("old PDF\n")
+        (self.root / "source.typ").write_text("Source.\n")
+        tools = self.root / "bin"
+        tools.mkdir()
+        helper = tools / "fancy-cat"
+        helper.write_text('''#!/usr/bin/python3
+import json, os, pathlib, socket, sys
+if os.environ.get("RELOAD_FAIL"):
+    print("old fork", file=sys.stderr)
+    sys.exit(2)
+with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sender:
+    payload = {"command": sys.argv[3:], "pdf": pathlib.Path(os.environ["RELOAD_PDF"]).read_text()}
+    sender.sendto(json.dumps(payload).encode(), sys.argv[2])
+''')
+        helper.chmod(0o700)
+        self.receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.addCleanup(self.receiver.close)
+        self.receiver.bind(str(self.root / "preview.sock"))
+        self.receiver.settimeout(0.05)
+        self.env = dict(os.environ, XDG_RUNTIME_DIR=str(self.root / "runtime"),
+                        PATH=str(tools) + ":" + os.environ["PATH"],
+                        HXP_VIEWER_KIND="fancy-cat", HXP_VIEWER_SOCKET=str(self.root / "preview.sock"),
+                        RELOAD_PDF=str(self.pdf))
+
+    def shell(self, script, **env):
+        return subprocess.run(["zsh", "-f", "-c", 'source "$1"; d="$2"; ' + script,
+                               "hxp-reload-test", str(REPO / "zsh/hxp-lib.zsh"), str(self.root)],
+                              env=dict(self.env, **env), capture_output=True, text=True)
+
+    def notification(self, text):
+        self.assertEqual(json.loads(self.receiver.recv(8192)), {"command": ["reload"], "pdf": text})
+
+    def no_notification(self):
+        with self.assertRaises(socket.timeout):
+            self.receiver.recv(8192)
+
+    def test_only_the_session_socket_is_notified(self):
+        other = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.addCleanup(other.close)
+        other.bind(str(self.root / "other.sock"))
+        other.settimeout(0.05)
+        result = self.shell("_hxp_reload_viewer")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.notification("old PDF\n")
+        with self.assertRaises(socket.timeout):
+            other.recv(8192)
+
+    def test_missing_or_older_viewers_leave_polling_available(self):
+        for env in ({"HXP_VIEWER_KIND": "zathura"}, {"HXP_VIEWER_SOCKET": ""},
+                    {"HXP_VIEWER_SOCKET": str(self.root / "gone.sock")}, {"RELOAD_FAIL": "1"}):
+            result = self.shell("_hxp_reload_viewer", **env)
+            self.assertEqual((result.returncode, result.stderr), (0, ""))
+            self.no_notification()
+
+    def test_generic_build_notifies_after_success_and_error_publication(self):
+        script = r'''
+_hxp_need_cmd() { [[ "$1" == typst ]] }
+typst() { print -r -- '%PDF-good' > "${@[-1]}" }
+_hxp_make_error_pdf() { print -r -- '%PDF-error' > "$5" }
+compile() {
+  _hxp_compile_once "$d/source.typ" typ "$d" source "$d/source.pdf" "$d/.tmp.pdf" \
+    "$d/.error.log" "$d/.error.md" "$d/.debug.tex" "$d/.build"
+}
+compile || exit 9
+typst() { return 1 }
+compile
+'''
+        result = self.shell(script)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.notification("%PDF-good\n")
+        self.notification("%PDF-error\n")
+        self.no_notification()
+
+    def test_native_watch_notifies_publications_and_preserves_last_good(self):
+        script = r'''
+print -r -- '%PDF-native' > "$d/.watch.pdf"
+_hxp_make_error_pdf() { print -r -- '%PDF-error' > "$5" }
+render() {
+  _hxp_typst_render_state "$1" 'failure' "$d/source.typ" typ "$d/.error.log" "$d/.error.md" \
+    "$d/.tmp.pdf" "$d/.debug.tex" "$d/source.pdf" "$d/.watch.pdf"
+}
+render ok || exit 9
+render fail || exit 10
+_hxp_make_error_pdf() { return 1 }  # --keep-last-good suppresses publication.
+render fail
+'''
+        result = self.shell(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.notification("%PDF-native\n")
+        self.notification("%PDF-error\n")
+        self.no_notification()
+
+
 class TypstForwardCacheTests(unittest.TestCase):
     """Cache page text until the PDF changes."""
 

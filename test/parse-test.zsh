@@ -76,6 +76,36 @@ for a in $awks; do
         "$(HXP_AWK=$a _hxp_primary_error "$typst_log")"
 done
 
+print -r -- '  [runaway hint matching]'
+hint_source="$work/hint source.tex"
+unmatched_hint=''
+unmatched_hint="${(l:120::x:)unmatched_hint}"
+for a in $awks; do
+  print -rl -- 'Long matching prefix' 'Long matching prefix with more words' > "$hint_source"
+  check "$a prefers the longest prefix, not the earliest short match" 2 \
+    "$(HXP_AWK=$a _hxp_line_from_hint "$hint_source" 'Long matching prefix with more words missing')"
+  print -rl -- 'Repeated matching words' 'Repeated matching words' > "$hint_source"
+  check "$a keeps the first line on a tie" 1 \
+    "$(HXP_AWK=$a _hxp_line_from_hint "$hint_source" 'Repeated matching words absent')"
+  print -rl -- 'ab[cd].*\new\tokens' 'ab[cd].*newtokens' > "$hint_source"
+  check "$a preserves literal backslashes and regex characters" 1 \
+    "$(HXP_AWK=$a _hxp_line_from_hint "$hint_source" 'ab[cd].*\new\tokens')"
+  print -rl -- 'First sentence.' 'First sentence. Distinct continuation' > "$hint_source"
+  check "$a retains sentence trimming" 1 \
+    "$(HXP_AWK=$a _hxp_line_from_hint "$hint_source" 'First sentence. Distinct continuation')"
+  print -rl -- '1234567각' '1234567가' > "$hint_source"
+  check "$a matches complete Unicode characters" 2 \
+    "$(HXP_AWK=$a _hxp_line_from_hint "$hint_source" '1234567가X')"
+  print -r -- '1234567각' > "$hint_source"
+  check "$a rejects a match ending inside a Unicode character" '' \
+    "$(HXP_AWK=$a _hxp_line_from_hint "$hint_source" '1234567가X')"
+  print -r -- '가나다라마바사' > "$hint_source"
+  check "$a requires eight characters, not eight bytes" '' \
+    "$(HXP_AWK=$a _hxp_line_from_hint "$hint_source" '가나다라마바사')"
+  check "$a leaves an unmatched long hint unresolved" '' \
+    "$(HXP_AWK=$a _hxp_line_from_hint "$hint_source" "$unmatched_hint")"
+done
+
 print -r -- "  [watch scope]"
 check "md exts"   "md,bib"           "$(_hxp_watch_exts md)"
 check "tex exts"  "tex,bib,sty,cls"  "$(_hxp_watch_exts tex)"
@@ -264,6 +294,30 @@ rm -f -- "$work/main.tex"
 check "pos falls back"   "gone.tex||"    "$(epos "$work/gone.tex" "$latex_log")"
 check "helix hint bare"  "hx $work/gone.tex"    "$(_hxp_editor_target_for_error helix "$work/gone.tex" "$latex_log")"
 check "micro hint bare"  "micro $work/gone.tex" "$(_hxp_editor_target_for_error micro "$work/gone.tex" "$latex_log")"
+
+print -r -- '  [reuse diagnostic locations]'
+(
+  functions[_hxp_uncached_error_location]=$functions[_hxp_error_location]
+  _hxp_error_location() {
+    print -r -- parsed >> "$work/location-parses"
+    _hxp_uncached_error_location "$@"
+  }
+  print -r -- placeholder > "$work/main.tex"
+  : > "$work/location-parses"
+  _hxp_write_error_md "$work/main.tex" tex "$latex_log" "$work/report.md" ''
+  check 'error report parses its location once' 1 "$(wc -l < "$work/location-parses" | tr -d ' ')"
+  check 'report retains the editor command' yes \
+    "$(grep -qF -- "$work/main.tex:42" "$work/report.md" && print yes || print no)"
+  : > "$work/location-parses"
+  _hxp_render_errs "$latex_log" "$work/report.md" "$work/main.tex" > "$work/readout"
+  check 'diagnostic readout parses its location once' 1 "$(wc -l < "$work/location-parses" | tr -d ' ')"
+  : > "$work/location-parses"
+  _hxp_editor_target_for_error helix "$work/main.tex" "$latex_log" >/dev/null
+  check 'standalone editor target still parses its location' 1 "$(wc -l < "$work/location-parses" | tr -d ' ')"
+  check 'cached missing source still falls back to the session source' "hx $work/main.tex" \
+    "$(_hxp_editor_target_for_error helix "$work/main.tex" "$latex_log" "$work/missing.tex"$'\t42\t')"
+  exit "$fail"
+) || fail=1
 
 print -r -- "  [state file]"
 

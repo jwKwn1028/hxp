@@ -44,6 +44,9 @@ keeping the PDF. Terminal hangups trigger cleanup within about a second;
 detaching tmux leaves hxp running. Shared Sioyek windows with uncertain ownership
 stay open. Typst watches incrementally; other builds use watchexec (50ms debounce)
 or inotifywait. Generated files are ignored and PDFs are replaced atomically.
+hxp notifies its fancy-cat preview after publishing success or error PDFs,
+including native Typst output. Updated forks reload immediately; polling remains
+the fallback.
 
 ## Inverse search (PDF → editor)
 

@@ -475,6 +475,18 @@ print -r -- '  [hxp session wiring]'
   check 'captures viewer PID before toggle helper' "$(cat "$work/launch-pid")" "$(cat "$work/session-viewer-pid")"
   check 'persists viewer PID separately from session PID' "viewer_pid=$(cat "$work/launch-pid")" "$(grep '^viewer_pid=' "$work/session-state")"
   check 'cleanup keeps its original window identity' 0x002 "$(cat "$work/closed-window")"
+
+  _hxp_viewer() { print fancy-cat }
+  _hxp_start_split() { preview_dir="$work/preview-session"; mkdir -p "$preview_dir" }
+  _hxp_release_split() { return 0 }
+  wpdf() { print -rl -- "$HXP_VIEWER_KIND" "$HXP_VIEWER_SOCKET" > "$work/watcher-viewer" }
+  _hxp_editor_open() {
+    for attempt in {1..100}; do [[ -s "$work/watcher-viewer" ]] && return 0; sleep 0.01; done
+    return 1
+  }
+  hxp "$project/main.typ"
+  check 'watcher receives only its own preview socket' "fancy-cat"$'\n'"$work/preview-session/socket" \
+    "$(cat "$work/watcher-viewer" 2>/dev/null)"
   exit "$fail"
 ) || fail=1
 

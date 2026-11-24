@@ -602,7 +602,8 @@ hxp() {
   print -r -- "viewer_windowid=$viewer_wid" >> "$state_file" 2>/dev/null
   [[ -n "$viewer_wid" ]] && _hxp_wmctrl_tile "$viewer_wid" right id
 
-  HXP_VIEWER_PID=$zpid HXP_VIEWER_KIND=$viewer wpdf -q --no-initial "$src" >/dev/null 2>&1 &!
+  HXP_VIEWER_PID=$zpid HXP_VIEWER_KIND=$viewer HXP_VIEWER_SOCKET="${preview_dir:+$preview_dir/socket}" \
+    wpdf -q --no-initial "$src" >/dev/null 2>&1 &!
   local wpid=$!
 
 

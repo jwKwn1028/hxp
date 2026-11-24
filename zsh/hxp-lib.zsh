@@ -320,9 +320,11 @@ _hxp_watch_match() {
   [[ "$exts" == *",${cbase:e},"* ]]
 }
 
-# Zathura reloads natively; SIGHUP can terminate it.
+# Notify the session preview; GUI viewers reload themselves.
 _hxp_reload_viewer() {
-  :
+  [[ "${HXP_VIEWER_KIND:-}" == fancy-cat && -S "${HXP_VIEWER_SOCKET:-}" ]] || return 0
+  # Polling covers unsupported or missed notifications.
+  fancy-cat --remote "$HXP_VIEWER_SOCKET" reload >/dev/null 2>&1 || true
 }
 
 _hxp_extract_line() {
@@ -372,20 +374,39 @@ _hxp_runaway_hint() {
 
 _hxp_line_from_hint() {
   emulate -L zsh
-  local file="$1" hint="$2" line needle
+  local file="$1" hint="$2" needle awk_bin
   [[ -f "$file" && -n "$hint" ]] || return 0
 
   needle="$hint"
   [[ "$needle" == *". "* ]] && needle="${needle%%. *}."
+  (( ${#needle} >= 8 )) || return 0
 
-  while (( ${#needle} >= 8 )); do
-    line="$(grep -nF -- "$needle" "$file" 2>/dev/null | head -n 1 | cut -d: -f1)"
-    if [[ -n "$line" ]]; then
-      print -r -- "$line"
-      return 0
-    fi
-    needle="${needle%?}"
+  # Use zsh character boundaries so awk versions agree.
+  local -a chars=( "${(@s::)needle}" ) cuts=()
+  local -i i bytes=0
+  unsetopt multibyte
+  for (( i = 1; i <= ${#chars}; ++i )); do
+    (( bytes += ${#chars[i]} ))
+    (( i >= 8 )) && cuts+=( "$bytes" )
   done
+  _hxp_awk_reply; awk_bin="$REPLY"
+  # ENVIRON preserves backslashes that -v would unescape.
+  LC_ALL=C HXP_HINT_NEEDLE="$needle" HXP_HINT_CUTS="${(j: :)cuts}" "$awk_bin" '
+    BEGIN {
+      needle = ENVIRON["HXP_HINT_NEEDLE"]
+      n = split(ENVIRON["HXP_HINT_CUTS"], cuts, " ")
+    }
+    {
+      for (i = n; i > best; --i) {
+        if (index($0, substr(needle, 1, cuts[i]))) {
+          best = i; line = NR
+          break
+        }
+      }
+      if (best == n) exit
+    }
+    END { if (line) print line }
+  ' < "$file" 2>/dev/null
 }
 
 _hxp_error_location() {
@@ -441,12 +462,12 @@ _hxp_error_location() {
   printf '%s\t%s\t%s\n' "$file" "$line" "$col"
 }
 
-# FILE<TAB>LINE<TAB>COL; ignore missing files.
+# FILE<TAB>LINE<TAB>COL; optional $3 is a cached location.
 _hxp_error_pos_for() {
   emulate -L zsh
   local src="$1" err_log="$2" loc file line col
 
-  loc="$(_hxp_error_location "$err_log" "$src")"
+  loc="${3-$(_hxp_error_location "$err_log" "$src")}"
   IFS=$'\t' read -r file line col <<< "$loc"
 
   if [[ -n "$line" && -f "$file" ]]; then
@@ -456,12 +477,13 @@ _hxp_error_pos_for() {
   fi
 }
 
+# Optional $4 forwards the parsed location.
 _hxp_editor_target_for_error() {
   emulate -L zsh
   local editor="$1" src="$2" err_log="$3" file line col
   local -a cmd
 
-  IFS=$'\t' read -r file line col <<< "$(_hxp_error_pos_for "$src" "$err_log")"
+  IFS=$'\t' read -r file line col <<< "$(_hxp_error_pos_for "$src" "$err_log" "${@:4}")"
   cmd=( "${(@f)$(_hxp_editor_argv "$editor" "$file" "$line" "$col")}" )
   print -r -- "${cmd[*]}"
 }
@@ -579,7 +601,7 @@ _hxp_write_error_md() {
   extract="$(_hxp_error_extract "$err_log")"
   primary="$(_hxp_primary_error "$err_log")"
   source_line="$(_hxp_source_line "$loc_file" "$line")"
-  editor_cmd="$(_hxp_editor_target_for_error "$(_hxp_session_editor "$src")" "$src" "$err_log")"
+  editor_cmd="$(_hxp_editor_target_for_error "$(_hxp_session_editor "$src")" "$src" "$err_log" "$loc")"
   count="$(_hxp_error_count "$err_log")"
   if [[ "$count" -gt 1 ]]; then
     count_label="Compile failed - $count errors"
@@ -874,11 +896,14 @@ _hxp_typst_render_state() {
     fi
     _hxp_forget_error_pdf "$pdf"
     zf_rm -f -- "$err_md"
+    _hxp_reload_viewer
     return 0
   fi
   print -rn -- "$buf" >> "$err_log"
   if _hxp_make_error_pdf "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf"; then
-    [[ -s "$temp_pdf" ]] && _hxp_publish_error_pdf "$temp_pdf" "$pdf"
+    if [[ -s "$temp_pdf" ]] && _hxp_publish_error_pdf "$temp_pdf" "$pdf"; then
+      _hxp_reload_viewer
+    fi
   fi
   zf_rm -f -- "$temp_pdf"
   return 0
@@ -1094,8 +1119,7 @@ _hxp_compile_once() {
   fi
 
   if _hxp_make_error_pdf "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf"; then
-    if [[ -s "$temp_pdf" ]]; then
-      _hxp_publish_error_pdf "$temp_pdf" "$pdf"
+    if [[ -s "$temp_pdf" ]] && _hxp_publish_error_pdf "$temp_pdf" "$pdf"; then
       _hxp_reload_viewer
     fi
   fi
@@ -1136,7 +1160,7 @@ _hxp_render_errs() {
   fi
 
   local cmd
-  cmd="$(_hxp_editor_target_for_error "$(_hxp_session_editor "$src")" "$src" "$err_log")"
+  cmd="$(_hxp_editor_target_for_error "$(_hxp_session_editor "$src")" "$src" "$err_log" "$loc")"
   printf '\n  %s%s%s\n' "$C_DIM" "$cmd" "$C_RST"
 }
 
