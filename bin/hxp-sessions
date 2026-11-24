@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
-# Usage: hxp-sessions
-# List live hxp sessions, one per line, tab-separated:
-#   TMUX_SOCKET  TMUX_PANE  EDITOR  VIEWER  VIEWER_SOCKET  SOURCE
-# The tmux fields are empty outside tmux, VIEWER_SOCKET unless VIEWER is
-# fancy-cat. A session is live while the shell that ran hxp is (same PID and
-# start time) and, for fancy-cat, its socket exists. Fields never hold tabs.
-# Read-only: hxp-jump clears stale state files.
+# Live sessions as TSV: TMUX_SOCKET TMUX_PANE EDITOR VIEWER VIEWER_SOCKET SOURCE.
+# Empty targets stay empty; fancy-cat requires a socket. Never modifies state.
 
 set -u
 
-# Start time in clock ticks: tells a reused PID apart.
 proc_start() {
   local stat
   [[ -r "/proc/$1/stat" ]] || return 1

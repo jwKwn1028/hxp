@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Run sioyek.dual_panelify from HXP_SIOYEK_VENV or the default venv.
 
 set -euo pipefail
 

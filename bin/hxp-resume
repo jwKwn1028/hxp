@@ -1,9 +1,6 @@
 #!/bin/sh
-# hxp-resume PANE_INDEX helix|micro SOURCE: reopen hxp in its saved editor pane.
-# A tmux saver records this in the viewer pane of a session from hxp-sessions,
-# with the editor pane saved as a shell. While it waits, @hxp-resume on this
-# pane holds "EDITOR_PANE_ID EDITOR SOURCE", so a save can write the editor's
-# current index. It waits while the server option @resurrect-restoring is 1.
+# hxp-resume PANE_INDEX helix|micro SOURCE, saved in the viewer pane.
+# Wait for tmux restore and an idle editor shell; @hxp-resume tracks its pane ID.
 set -eu
 
 if [ "$#" -ne 3 ] || [ -z "${TMUX_PANE:-}" ]; then
@@ -20,7 +17,7 @@ if [ ! -f "$src" ]; then
     exit 1
 fi
 
-# Pin the editor before pane indices change.
+# Pin the pane ID before indices change.
 self=$TMUX_PANE
 pane=$(tmux display -p -t "$(tmux display -p -t "$self" '#{window_id}').$index" '#{pane_id}')
 if [ "$pane" = "$self" ]; then
@@ -30,14 +27,12 @@ fi
 shell=$(tmux display -p -t "$pane" '#{pane_pid}')
 born=$(ps -o lstart= -p "$shell") || { echo 'hxp-resume: the editor pane has no shell' >&2; exit 1; }
 
-# Saves resolve this pane ID to the editor's current index.
 tmux set -p -t "$self" @hxp-resume "$pane $editor $src"
 trap 'tmux set -pu -t "$self" @hxp-resume 2>/dev/null || :' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 
-# Require the original foreground shell with no children.
-# Foreground groups alone miss editors run with job control off.
+# Require the original idle shell; process groups alone miss unmonitored jobs.
 idle() {
     [ "$(tmux display -p -t "$pane" '#{pane_pid}' 2>/dev/null)" = "$shell" ] || return 1
     [ "$(ps -o lstart= -p "$shell" 2>/dev/null)" = "$born" ] || return 1
@@ -49,14 +44,12 @@ idle() {
     ! pgrep -P "$shell" >/dev/null 2>&1
 }
 
-# Wait before changing pane indices.
 tries=0
 while [ "$(tmux show -sqv @resurrect-restoring)" = 1 ] && [ "$tries" -lt 600 ]; do
     tries=$((tries + 1))
     sleep 0.2
 done
 
-# Fancy-cat needs an attached Ghostty client.
 if command -v fancy-cat >/dev/null 2>&1 && [ -z "${SSH_CONNECTION:-}" ]; then
     waiting=
     until fancy-cat --tmux-supported >/dev/null 2>&1; do
@@ -68,7 +61,6 @@ if command -v fancy-cat >/dev/null 2>&1 && [ -z "${SSH_CONNECTION:-}" ]; then
     done
 fi
 
-# Allow brief prompt redraws before treating the shell as busy.
 tries=0
 until idle; do
     tries=$((tries + 1))
@@ -78,7 +70,7 @@ until idle; do
     fi
     sleep 0.1
 done
-# Respawn to avoid sending keys into Helix command mode.
+# Respawn instead of injecting editor keystrokes.
 start=$(tmux show -gqv default-command)
 set -- set -pu -t "$self" @hxp-resume \; \
     respawn-pane -k -t "$pane" -c "$(tmux display -p -t "$pane" '#{pane_current_path}')" \

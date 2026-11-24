@@ -2,7 +2,6 @@ set selection-clipboard clipboard
 
 set guioptions ""
 
-# Ctrl+click jumps to the session editor.
 set synctex true
 set synctex-editor-command "hxp-jump %{input}:%{line}"
 

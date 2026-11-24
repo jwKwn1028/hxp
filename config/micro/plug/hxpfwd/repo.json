@@ -1,7 +1,7 @@
 [
     {
         "Name": "hxpfwd",
-        "Description": "hxp synctex forward search: move the PDF to the cursor line",
+        "Description": "hxp cursor-to-PDF search",
         "Website": "https://github.com/jwKwn1028/hxp",
         "Tags": ["hxp", "synctex", "pdf"],
         "Versions": [

@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# Parser and mapping tests; exercise all installed awk implementations.
+# Parser/mapping tests across installed awk implementations.
 
 emulate -L zsh
 set -u
@@ -142,13 +142,12 @@ check "heading maps to \section"   5  "$(tl 1)"
 check "prose maps verbatim"         7  "$(tl 3)"
 check "subheading maps"            10  "$(tl 5)"
 check "second prose block"         12  "$(tl 7)"
-# Weak anchors must stay within the correct section.
 check "weak list anchor"           17  "$(tl 9)"
 check "blank line falls outward"    7  "$(tl 2)"
 check "line past EOF"              ""  "$(tl 9999)"
 check "missing tex file"           ""  "$("$repo/bin/hxp-texline" "$tl_md" "$work/nope.tex" 3)"
 
-# Repeated headings must distinguish contents entries from sections.
+# Distinguish TOC entries from repeated headings.
 tl2_md="$work/toc.md"
 tl2_tex="$work/toc.hxp.tex"
 cat >| "$tl2_md" <<'EOF'
@@ -233,7 +232,6 @@ check "editor unknown"    helix "$(HXP_EDITOR=vim; _hxp_editor)"
 check "bin helix"         hx    "$(_hxp_editor_bin helix)"
 check "bin micro"         micro "$(_hxp_editor_bin micro)"
 
-# Avoid zsh's reserved argv parameter.
 eargv() {
   local -a a; a=( "${(@f)$(_hxp_editor_argv "$@")}" )
   print -r -- "${(j:|:)a}"

@@ -1,5 +1,4 @@
 #!/usr/bin/env zsh
-# Compile without loading .zshrc.
 emulate -L zsh
 source "${HOME}/.zsh/hxp-lib.zsh"
 _hxp_compile_once "$@"

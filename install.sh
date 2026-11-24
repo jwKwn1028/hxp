@@ -1,43 +1,24 @@
 #!/usr/bin/env bash
-# Install symlinks; back up existing files. --deps prints dependencies;
-# --no-config leaves the Zathura and Sioyek configs to your dotfiles.
+# Install symlinks with backups; --no-config skips viewer configs.
 
 set -euo pipefail
 
 print_deps() {
   cat <<'EOF'
-Dependencies (install via your package manager):
+Dependencies (package manager):
 
-  Required:
-    zsh                  shell
-    pandoc               markdown -> PDF pipeline
-    inotify-tools        inotifywait, for the fallback watch loop
-    an editor            helix (hx) by default, or micro via `hxp --micro`
-                         / HXP_EDITOR=micro. Only the one you use is needed.
+  Required: zsh, pandoc, inotify-tools, helix (hx) or micro.
+  Builds:   latexmk for .tex/Markdown SyncTeX; xelatex for Unicode/CJK;
+            typst for .typ; watchexec for debounced watching.
+  Viewers:  fancy-cat fork (--listen/--remote), or zathura/sioyek.
+  X11:      wmctrl/xprop for placement; wmctrl for forward-search focus;
+            xdotool for native Ghostty splits and editor keystrokes.
+  Search:   python3 for fancy-cat inverse lookup; tmux for editor-pane jumps;
+            pdftotext (poppler-utils) for Typst forward search;
+            gdbus (glib2) for Typst → Zathura paging.
+  CJK:      fonts-noto-cjk, or HXP_CJK_FONT.
 
-  Recommended:
-    watchexec            kernel-level debouncing, smarter watch loop
-    xelatex              Unicode-capable PDF engine (texlive-xetex)
-    latexmk              .tex compile driver
-    typst                .typ compiler
-    fancy-cat            preferred PDF viewer (fork with --listen and --remote)
-    zathura or sioyek    fallback PDF viewer
-    wmctrl, xprop        X11 tiling; wmctrl also focuses the viewer for
-                         forward search (both no-op on Wayland)
-
-  Inverse search (PDF -> editor), optional:
-    tmux                 in-place jumps into the running editor's pane
-    xdotool              native Ghostty split, focus, and X11 editor keystrokes
-
-  Forward search (editor -> PDF), optional:
-    pdftotext            typst text-search fallback (poppler-utils)
-    gdbus                pages a running zathura for typst (glib2)
-
-  CJK markdown PDFs (Korean/Japanese/Chinese):
-    fonts-noto-cjk       or set HXP_CJK_FONT to a preferred family
-
-  Note: any awk works (gawk/mawk/busybox) — no gawk-only features are used.
-  Run `hxp --doctor` after install to see which features are active.
+Any POSIX awk works. Run hxp --doctor to check available features.
 EOF
 }
 
@@ -80,6 +61,7 @@ link "$repo/zsh/hxp-lib.zsh"              "$HOME/.zsh/hxp-lib.zsh"
 link "$repo/bin/hxp-compile"              "$HOME/.local/bin/hxp-compile"
 link "$repo/bin/hxp-first-error"          "$HOME/.local/bin/hxp-first-error"
 link "$repo/bin/hxp-jump"                 "$HOME/.local/bin/hxp-jump"
+link "$repo/bin/hxp-inverse"              "$HOME/.local/bin/hxp-inverse"
 link "$repo/bin/hxp-mdline"               "$HOME/.local/bin/hxp-mdline"
 link "$repo/bin/hxp-fwd"                  "$HOME/.local/bin/hxp-fwd"
 link "$repo/bin/hxp-texline"              "$HOME/.local/bin/hxp-texline"
@@ -87,7 +69,6 @@ link "$repo/bin/hxp-typtext"              "$HOME/.local/bin/hxp-typtext"
 link "$repo/bin/hxp-dual-panelify"        "$HOME/.local/bin/hxp-dual-panelify"
 link "$repo/bin/hxp-sessions"             "$HOME/.local/bin/hxp-sessions"
 link "$repo/bin/hxp-resume"               "$HOME/.local/bin/hxp-resume"
-# The Micro plugin is code the editor bindings call, not preference.
 link "$repo/config/micro/plug/hxpfwd"     "$HOME/.config/micro/plug/hxpfwd"
 if (( config )); then
   link "$repo/config/zathura/zathurarc"   "$HOME/.config/zathura/zathurarc"
@@ -99,37 +80,23 @@ fi
 
 cat <<'EOF'
 
-Done. Final step (one-time):
+Done. Add to ~/.zshrc and reload; keep ~/.local/bin on PATH:
 
-  Add the following line to ~/.zshrc, then reload your shell:
+  [[ -r "$HOME/.zsh/hxp-main.zsh" ]] && source "$HOME/.zsh/hxp-main.zsh"
 
-      [[ -r "$HOME/.zsh/hxp-main.zsh" ]] && source "$HOME/.zsh/hxp-main.zsh"
+Forward search bindings:
 
-  Verify ~/.local/bin is on PATH; if not, add it before zathura/sioyek
-  spawn so synctex reverse-search can find hxp-jump.
+  Helix — ~/.config/helix/config.toml:
+    [keys.normal]
+    "C-l" = ":sh hxp-fwd '%{buffer_name}' %{cursor_line} %{cursor_column}"
 
-  For forward search (cursor -> PDF), bind a key in your editor. hxp ships
-  the shim, not the binding.
+  Micro — ~/.config/micro/bindings.json (plugin installed; goto is Ctrl-e goto):
+    "Ctrl-l": "command:hxpfwd"
 
-  helix — ~/.config/helix/config.toml:
+  Native Ghostty/X11 — ~/.config/ghostty/config:
+    keybind = ctrl+shift+h=goto_split:left
 
-      [keys.normal]
-      F8 = ":open %sh{hxp-first-error}"
-      "C-l" = ":sh hxp-fwd '%{buffer_name}' %{cursor_line} %{cursor_column}"
-
-  micro — ~/.config/micro/bindings.json (the hxpfwd command comes from the
-  plugin linked above; this replaces micro's default `goto ` prefill on
-  Ctrl-l, which stays available as Ctrl-e goto):
-
-      "F8": "command:hxperror",
-      "Ctrl-l": "command:hxpfwd"
-
-  ghostty (native X11 split) — ~/.config/ghostty/config. Ctrl+Shift+O is
-  Ghostty's default right split; hxp also needs this non-default binding to
-  return focus to the editor:
-
-      keybind = ctrl+shift+h=goto_split:left
-
+See manual.md for search, splits, and troubleshooting.
 EOF
 
 print_deps

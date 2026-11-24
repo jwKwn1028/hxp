@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+"""Resolve PDF PAGE X Y TEXT to FILE:LINE:COL.
+
+Exit: 1 failure, 2 bad args, 3 no prose, 4 ambiguous prose,
+5 no session, 6 no SyncTeX location.
+"""
+
+import hashlib
+import math
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import unicodedata
+
+
+class LookupError(Exception):
+    def __init__(self, message, code=3):
+        super().__init__(message)
+        self.code = code
+
+
+def live(state):
+    try:
+        pid = int(state["pid"])
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+        if state.get("pid_start"):
+            start = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[19]
+            return start == state["pid_start"]
+        return True
+    except (KeyError, ValueError, OSError, IndexError):
+        return False
+
+
+def session_for(pdf):
+    directory = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "hxp"
+    # GUI viewers may be shared; pin fancy-cat only.
+    source = os.environ.get("HXP_PREVIEW_SRC")
+    if source:
+        key = hashlib.sha1(str(Path(source).resolve()).encode()).hexdigest()
+        candidates = [directory / f"{key}.state"]
+    else:
+        candidates = directory.glob("*.state")
+    matches = []
+    for candidate in candidates:
+        try:
+            state = dict(line.split("=", 1) for line in candidate.read_text().splitlines() if "=" in line)
+            if state.get("pdf") and Path(state["pdf"]).resolve() == pdf and live(state):
+                matches.append(state)
+        except OSError:
+            continue
+    if len(matches) != 1:
+        raise LookupError("no unique live hxp session for this PDF", 5)
+    return matches[0]
+
+
+PROSE, CODE, STRING, COMMENT, OTHER = range(5)
+# Embedded statements end at newline.
+STATEMENTS = {"let", "set", "show", "import", "include", "if", "for", "while",
+              "context", "return", "break", "continue"}
+IDENT = re.compile(r"[^\W\d][\w-]*")
+MARKUP_STOP = re.compile(r"[#\[\]\\/$`@<]")
+CODE_STOP = re.compile(r'["()\[\]{}/$`;\n]')
+STRING_REST = re.compile(r'(?:[^"\\]|\\.)*"', re.S)
+MATH_REST = re.compile(r"(?:[^$\\]|\\.)*\$", re.S)
+BLOCK_COMMENT = re.compile(r"/\*|\*/")
+BACKTICKS = re.compile(r"`+")
+REFERENCE = re.compile(r"@[\w-]+(?:[:.][\w-]+)*")
+LABEL = re.compile(r"<[\w-]+(?:[:.][\w-]+)*>")
+UNICODE_ESCAPE = re.compile(r"\\u\{[0-9A-Fa-f]*\}")
+DEPENDENCY = re.compile(r'\b(?:include|import)\s*\(?\s*"([^"\n]+\.typ)"')
+
+
+def classify(source):
+    """Classify Typst characters; uncertain syntax remains prose."""
+    n = len(source)
+    kinds = bytearray(n)
+    # Stack: (mode, closer, may_chain).
+    stack = [("markup", None, False)]
+
+    def fill(start, end, kind):
+        kinds[start:end] = bytes((kind,)) * (end - start)
+
+    def comment(i):
+        if source.startswith("//", i):
+            end = source.find("\n", i)
+            end = n if end < 0 else end
+        else:
+            depth, end = 1, i + 2
+            while depth:
+                match = BLOCK_COMMENT.search(source, end)
+                if not match:
+                    end = n
+                    break
+                depth += 1 if match[0] == "/*" else -1
+                end = match.end()
+        fill(i, end, COMMENT)
+        return end
+
+    def literal(i, rest, kind):
+        match = rest.match(source, i + 1)
+        end = match.end() if match else n
+        fill(i, end, kind)
+        return end
+
+    def raw(i):
+        ticks = len(BACKTICKS.match(source, i)[0])
+        if ticks == 2:
+            end = i + 2  # `` is an empty raw block
+        else:
+            end = source.find("`" * ticks, i + ticks)
+            end = n if end < 0 else end + ticks
+        fill(i, end, OTHER)
+        return end
+
+    def chain(i):
+        while i < n:
+            if source[i] == "." and (match := IDENT.match(source, i + 1)):
+                fill(i, match.end(), CODE)
+                i = match.end()
+            elif source[i] in "([":
+                fill(i, i + 1, CODE)
+                stack.append(("code", ")", True) if source[i] == "(" else ("content", "]", True))
+                return i + 1
+            else:
+                break
+        return i
+
+    i = 0
+    while i < n:
+        mode, closer, _ = stack[-1]
+        if mode in ("markup", "content", "text"):
+            match = MARKUP_STOP.search(source, i)
+            if not match:
+                break
+            i = match.start()
+            char = source[i]
+            if char == "\\":
+                escape = UNICODE_ESCAPE.match(source, i)
+                fill(i, escape.end() if escape else i + 1, OTHER)
+                i = escape.end() if escape else i + 2  # an escaped character is prose
+            elif char == "/":
+                # Preserve URL slashes.
+                if source.startswith("/*", i) or (source.startswith("//", i)
+                                                  and not source.endswith(("http:", "https:"), 0, i)):
+                    i = comment(i)
+                else:
+                    i += 1
+            elif char == "$":
+                i = literal(i, MATH_REST, OTHER)
+            elif char == "`":
+                i = raw(i)
+            elif char == "@":
+                reference = REFERENCE.match(source, i)
+                if reference and (i == 0 or not source[i - 1].isalnum()):
+                    fill(i, reference.end(), OTHER)
+                    i = reference.end()
+                else:
+                    i += 1
+            elif char == "<":
+                label = LABEL.match(source, i)
+                if label:
+                    fill(i, label.end(), OTHER)
+                    i = label.end()
+                else:
+                    i += 1
+            elif char == "#":
+                name = IDENT.match(source, i + 1)
+                if name:
+                    fill(i, name.end(), CODE)
+                    if name[0] in STATEMENTS:
+                        stack.append(("line", None, False))
+                        i = name.end()
+                    else:
+                        i = chain(name.end())
+                elif source.startswith(("#(", "#["), i):
+                    fill(i, i + 1, CODE)
+                    i = chain(i + 1)
+                elif source.startswith("#{", i):
+                    fill(i, i + 2, CODE)
+                    stack.append(("code", "}", False))
+                    i += 2
+                else:
+                    i += 1
+            elif char == "[":
+                stack.append(("text", "]", False))  # text brackets
+                i += 1
+            else:  # "]"
+                if mode == "markup":
+                    i += 1
+                    continue
+                _, _, chained = stack.pop()
+                if mode == "content":
+                    fill(i, i + 1, CODE)
+                i += 1
+                if chained:
+                    i = chain(i)
+        else:  # "code" inside brackets, or a "line" statement
+            match = CODE_STOP.search(source, i)
+            if not match:
+                fill(i, n, CODE)
+                break
+            fill(i, match.start(), CODE)
+            i = match.start()
+            char = source[i]
+            if char == '"':
+                i = literal(i, STRING_REST, STRING)
+            elif char == "/":
+                if source.startswith(("//", "/*"), i):
+                    i = comment(i)
+                else:
+                    fill(i, i + 1, CODE)
+                    i += 1
+            elif char == "$":
+                i = literal(i, MATH_REST, OTHER)
+            elif char == "`":
+                i = raw(i)
+            elif char in "({[":
+                fill(i, i + 1, CODE)
+                stack.append(("content", "]", False) if char == "[" else ("code", ")" if char == "(" else "}", False))
+                i += 1
+            elif char in "\n;":
+                if mode == "line":
+                    stack.pop()
+                fill(i, i + 1, CODE)
+                i += 1
+            elif mode == "line":
+                stack.pop()  # owner handles this closer
+            else:  # ")", "}" or "]"
+                fill(i, i + 1, CODE)
+                i += 1
+                if char == closer:
+                    _, _, chained = stack.pop()
+                    if chained:
+                        i = chain(i)
+    return kinds
+
+
+def keep(source, kinds, classes):
+    """Blank other classes, preserving offsets and newlines."""
+    hidden = re.compile(b"[^" + re.escape(bytes(sorted(classes))) + b"]+")
+    pieces, start = [], 0
+    for match in hidden.finditer(kinds):
+        pieces.append(source[start:match.start()])
+        pieces.append(re.sub(r"[^\n]", " ", source[match.start():match.end()]))
+        start = match.end()
+    pieces.append(source[start:])
+    return "".join(pieces)
+
+
+def source_files(entry, root):
+    """Follow literal local Typst imports/includes within root."""
+    pending, seen = [entry], set()
+    while pending:
+        path = pending.pop().resolve()
+        if path in seen or not path.is_relative_to(root) or path.suffix != ".typ":
+            continue
+        seen.add(path)
+        try:
+            source = path.read_text()
+        except (OSError, UnicodeError):
+            continue
+        kinds = classify(source)
+        for match in DEPENDENCY.finditer(keep(source, kinds, {CODE, STRING})):
+            # Typst / paths resolve against the PDF directory.
+            name = match[1]
+            pending.append(root / name.lstrip("/") if name.startswith("/") else path.parent / name)
+        yield path, source, keep(source, kinds, {PROSE})
+
+
+# Tokenize Han and kana per character.
+CJK = "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0003134f"
+TOKEN = re.compile(f"[{CJK}]|[^\\W_{CJK}]+")
+RUN = re.compile(r"\S+")
+
+
+def tokens(text):
+    # Expand ligatures while preserving source offsets.
+    result = []
+    for run in RUN.finditer(text):
+        word = run[0]
+        if word.isascii():
+            normalized, offsets = word.lower(), None
+        else:
+            characters, offsets = [], []
+            for i, char in enumerate(word):
+                for value in unicodedata.normalize("NFKC", char).casefold():
+                    characters.append(value)
+                    offsets.append(i)
+            normalized = "".join(characters)
+        for match in TOKEN.finditer(normalized):
+            start = match.start() if offsets is None else offsets[match.start()]
+            result.append((match[0], run.start() + start))
+    return result
+
+
+def occurrences(hits, length):
+    """Merge nearby, ordered hits from disjoint query spans.
+
+    Repeated query spans remain ambiguous.
+    """
+    hits = list(hits.items())
+    parent = list(range(len(hits)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for a, ((doc_a, align_a), (qa0, qa1, pos_a)) in enumerate(hits):
+        for b in range(a + 1, len(hits)):
+            (doc_b, align_b), (qb0, qb1, pos_b) = hits[b]
+            disjoint = qa1 <= qb0 or qb1 <= qa0
+            ordered = (qa0 < qb0) == (pos_a < pos_b)
+            if doc_a == doc_b and disjoint and ordered and abs(align_a - align_b) <= length:
+                parent[find(a)] = find(b)
+    groups = {}
+    for i, hit in enumerate(hits):
+        groups.setdefault(find(i), []).append(hit)
+    return list(groups.values())
+
+
+def typst_location(pdf, state, text):
+    root = pdf.parent
+    entry = pdf.with_suffix(".typ")
+    if not entry.is_file():
+        entry = Path(state["src"]).resolve()
+    query = [word for word, _ in tokens(text)]
+    if not query or sum(map(len, query)) < 8:
+        raise LookupError("no searchable prose at this PDF position")
+    documents = []
+    for path, source, prose in source_files(entry, root):
+        items = tokens(prose)
+        words = [word for word, _ in items]
+        positions = {}
+        for pos, word in enumerate(words):
+            positions.setdefault(word, []).append(pos)
+        documents.append((path, source, items, words, positions))
+    # Prefer the longest shared phrase. Alignment collapses overlapping windows
+    # from one occurrence without choosing arbitrarily between repeated phrases.
+    minimum = min(3, len(query))
+    for size in range(min(24, len(query)), minimum - 1, -1):
+        hits = {}
+        for q in range(len(query) - size + 1):
+            phrase = query[q:q + size]
+            if sum(map(len, phrase)) < 8:
+                continue
+            for doc, (_, _, _, words, positions) in enumerate(documents):
+                for pos in positions.get(phrase[0], []):
+                    if words[pos:pos + size] == phrase:
+                        hit = hits.setdefault((doc, pos - q), [q, q + size, pos])
+                        hit[0], hit[1], hit[2] = min(hit[0], q), max(hit[1], q + size), min(hit[2], pos)
+        if hits:
+            groups = occurrences(hits, len(query))
+            if len(groups) != 1:
+                raise LookupError("text occurs more than once; choose more distinctive prose", 4)
+            doc, pos = min((key[0], value[2]) for key, value in groups[0])
+            path, source, items = documents[doc][:3]
+            offset = items[pos][1]
+            line = source.count("\n", 0, offset) + 1
+            column = offset - source.rfind("\n", 0, offset)
+            return f"{path}:{line}:{column}"
+    raise LookupError("no matching Typst prose; math and generated text may not map")
+
+
+def synctex_location(pdf, page, x, y):
+    if not shutil.which("synctex"):
+        raise LookupError("synctex is not installed", 1)
+    result = subprocess.run(["synctex", "edit", "-o", f"{page}:{x:.3f}:{y:.3f}:{pdf}"],
+                            capture_output=True, text=True)
+    fields = dict(line.split(":", 1) for line in result.stdout.splitlines() if ":" in line)
+    try:
+        line = int(fields.get("Line", "0"))
+        column = int(fields.get("Column", "1"))
+    except ValueError:
+        line = column = 0
+    if result.returncode or not fields.get("Input") or line < 1:
+        raise LookupError("no SyncTeX source location at this PDF position", 6)
+    return f"{fields['Input']}:{line}:{max(1, column)}"
+
+
+def resolve(args):
+    if len(args) != 5:
+        raise LookupError("usage: hxp-inverse PDF PAGE X Y TEXT", 2)
+    pdf = Path(args[0]).resolve()
+    try:
+        page, x, y = int(args[1]), float(args[2]), float(args[3])
+    except ValueError:
+        raise LookupError("invalid PDF position", 2) from None
+    if not pdf.is_file() or page < 1 or not (math.isfinite(x) and math.isfinite(y)):
+        raise LookupError("invalid PDF position", 2)
+    state = session_for(pdf)
+    if Path(state["src"]).suffix == ".typ":
+        return typst_location(pdf, state, args[4])
+    return synctex_location(pdf, page, x, y)
+
+
+if __name__ == "__main__":
+    try:
+        location = resolve(sys.argv[1:])
+        if "\n" in location or "\r" in location:
+            raise LookupError("source path contains a line break", 2)
+        print(location)
+    except LookupError as error:
+        print(f"hxp-inverse: {error}", file=sys.stderr)
+        sys.exit(error.code)
+    except (OSError, ValueError, KeyError) as error:
+        print(f"hxp-inverse: {error}", file=sys.stderr)
+        sys.exit(1)

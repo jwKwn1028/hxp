@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Usage: hxp-mdline <md-file> <tex-file> <tex-line>
-# Print the Markdown line matching a distinctive nearby TeX token, or nothing.
+# Match Markdown using nearby TeX tokens.
 
 set -u
 

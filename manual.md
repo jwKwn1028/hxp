@@ -1,133 +1,112 @@
 # hxp manual
 
-Live PDF preview for Markdown, LaTeX, and Typst, using Helix or Micro with
-fancy-cat. Saves rebuild the PDF and compile failures appear as error PDFs.
+Markdown, LaTeX, and Typst editing with Helix/Micro and live PDF preview.
 
 ## Setup
 
-Follow the [installation steps](README.md#install). The installer links the shell
-functions, helpers, viewer configs, and Micro plugin; `--no-config` skips the
-Zathura and Sioyek configs for dotfiles that own them. Rerunning it after an
-update creates missing links, including `~/.local/bin/hxp-first-error` and
-`~/.config/micro/plug/hxpfwd`. The chezmoi-managed editor configs supply the
-F8 bindings. The installer backs up existing regular files
-as `*.bak.<timestamp>`. Run `./install.sh --deps` for dependencies or
-`hxp --doctor` to check your setup.
+Follow [installation](README.md#install), then run `hxp --doctor`.
+The installer links helpers, the Micro plugin, and viewer configs; `--no-config`
+skips Zathura/Sioyek configs. Existing files become `*.bak.<timestamp>`.
+Rerun after updates. Dependencies: `./install.sh --deps`.
 
 ## Commands
 
 ```sh
-hxp notes.md                 # Helix, viewer, and watcher
-hxp --keep-last-good notes.md # keep the PDF on a failed build
-hxp --micro paper.tex        # Micro instead of Helix
+hxp notes.md                 # Helix, preview, watcher
+hxp --micro paper.tex        # Micro
 hxp --helix slides.typ       # override HXP_EDITOR
+hxp --keep-last-good FILE    # preserve a good PDF on failure
 wpdf [-q] [--no-initial] FILE # watcher only
-hxp_errs FILE                # live error readout; pair with hxp or wpdf
-hxp --doctor
+hxp_errs FILE                # live diagnostics alongside hxp/wpdf
 ```
 
-All three file commands accept `.md`, `.tex`, and `.typ`. `hxp` creates a starter
-file when needed, compiles it, and opens the editor and preview. An initial
-failure also opens diagnostic buffers. `wpdf -q` suppresses status messages;
-`--no-initial` skips the first build.
+Files may be `.md`, `.tex`, or `.typ`. `hxp` creates missing sources and builds
+before opening the editor; initial failures also open diagnostics.
+`wpdf -q` hides status; `--no-initial` skips its first build.
 
-fancy-cat opens to the right. In tmux, the editor pane keeps focus. Native X11
-Ghostty uses `xdotool` to press `Ctrl+Shift+O` (Ghostty's default
-`new_split:right`) and `Ctrl+Shift+H` to refocus the editor. `Ctrl+Shift+H` is
-not a Ghostty default; add it to `~/.config/ghostty/config`:
+## Preview splits
 
-```
+fancy-cat opens right of the editor. tmux keeps editor focus. Native X11 Ghostty
+uses `Ctrl+Shift+O` to split and needs this binding in `~/.config/ghostty/config`:
+
+```text
 keybind = ctrl+shift+h=goto_split:left
 ```
 
-Keep the editor and its preview as the window’s only splits. hxp can confirm
-that the Ghostty window has focus, but not which split, so inverse-search
-keystrokes go to whichever split is left of the preview. The split’s zsh must
-source hxp at startup.
+Keep only the editor and preview splits, and source hxp in each split's zsh.
+Ghostty inverse search relies on focus and the editor being left of the preview.
+Failed splits are closed; hxp falls back to Zathura, then Sioyek.
+`HXP_NO_SPLIT=1` forces a GUI viewer. Floating X11 windows use `wmctrl`/`xprop`;
+tiling WMs place them; Wayland placement is manual.
 
-If the preview cannot open there, hxp closes the unused split and tries Zathura,
-then Sioyek. Set `HXP_NO_SPLIT=1` to always use those. `hxp --doctor` reports
-why a split is unavailable.
-
-Quitting the editor stops the watcher, removes scratch files, and keeps the PDF.
-hxp closes its preview. Shared Sioyek windows stay open if ownership is unclear.
-
-Watchers track project sources and bibliographies. Typst uses incremental
-`typst watch`; other paths prefer `watchexec` with a 250ms debounce, then fall
-back to `inotifywait`. Generated files are excluded to prevent rebuild loops.
+Quitting or closing the editor stops the watcher and removes scratch files,
+keeping the PDF. Terminal hangups trigger cleanup within about a second;
+detaching tmux leaves hxp running. Shared Sioyek windows with uncertain ownership
+stay open. Typst watches incrementally; other builds use watchexec (50ms debounce)
+or inotifywait. Generated files are ignored and PDFs are replaced atomically.
 
 ## Inverse search (PDF → editor)
 
 | Viewer | Trigger |
 |---|---|
-| fancy-cat | Ctrl+click typeset text with a SyncTeX sidecar |
-| Sioyek | Hover text and press `F5`, or `Ctrl`+click |
-| Zathura | `Ctrl`+click text |
+| fancy-cat | Ctrl+L at pointer/view centre; Ctrl+click on release |
+| Sioyek | `F5` at pointer, or Ctrl+click |
+| Zathura | Ctrl+click |
 
-Keep `hxp-jump` on `PATH`. It targets the editor pane in tmux, uses `xdotool`
-on X11, or opens a new editor. LaTeX uses SyncTeX directly. Markdown needs
-`latexmk` for approximate source mapping. Typst supports forward search only.
+Keep `hxp-jump`, `hxp-inverse`, and Python 3 on `PATH`. fancy-cat Ctrl+L and Typst
+lookup require the fork's `--inverse-search-resolver` and `inverse_search` action
+(default `<C-l>`, configurable in `KeyMap`). Older builds support SyncTeX clicks.
 
-For a separate error pane:
+LaTeX uses SyncTeX; Markdown also needs latexmk and approximate source mapping.
+Typst matches prose in the root and literal local includes/imports, including
+root-relative paths. Code, comments, strings, math, and raw text are excluded;
+citations within prose are tolerated. Repeated or unmatched text reports
+`AmbiguousSourceText` or `NoMatchingSourceText`; dynamic/generated content may
+not map. LaTeX/Markdown misses report `NoSyncTeXSourceLocation`.
 
-```sh
-tmux new-session \; \
-  send-keys 'hxp paper.tex' C-m \; \
-  split-window -h \; \
-  send-keys 'hxp_errs paper.tex' C-m \; \
-  select-pane -L
+tmux targets recorded panes on the recorded server. Ctrl+click also needs this
+binding; reload with `tmux source-file ~/.tmux.conf`:
+
+```tmux
+bind -n C-MouseDown1Pane if -F -t = '#{mouse_any_flag}' { send-keys -M } { swap-pane -s @ }
 ```
+
+It forwards clicks to mouse-aware apps and keeps tmux's shell-pane behavior.
+Use tmux when focus follows the mouse. Each fancy-cat preview targets its own
+session; unreachable editors report failure. GUI viewers can spawn an editor
+only when the helper has a terminal; X11 otherwise uses `xdotool`.
 
 ## Forward search (editor → PDF)
 
-Helix — add to `~/.config/helix/config.toml`:
+Helix, `~/.config/helix/config.toml`:
 
 ```toml
 [keys.normal]
 "C-l" = ":sh ~/.local/bin/hxp-fwd '%{buffer_name}' %{cursor_line} %{cursor_column}"
 ```
 
-Micro — add to `~/.config/micro/bindings.json`:
+Micro, `~/.config/micro/bindings.json`:
 
 ```json
 "Ctrl-l": "command:hxpfwd"
 ```
 
-The installed `hxpfwd` plugin runs searches asynchronously. This replaces Micro's
-`Ctrl-l` goto prompt, which remains available through `Ctrl-e goto`.
-
-`hxp-fwd FILE LINE [COL]` targets the session’s fancy-cat socket, Zathura
-process, or Sioyek window. LaTeX uses SyncTeX. Markdown first maps the cursor
-to generated TeX.
-
-### Typst text search
-
-hxp uses `pdftotext` to find pages matching the cursor’s text. Nearby source
-lines break ties, with closer lines weighted more heavily.
-fancy-cat and Sioyek highlight the match. Zathura jumps to the page via
-`gdbus`. Tied scores select the earliest page. Math and generated text
-can yield no match.
+The installed Micro plugin runs asynchronously; its old goto prompt remains at
+`Ctrl-e goto`. `hxp-fwd FILE LINE [COL]` targets the session preview. Markdown
+maps through generated TeX. Typst caches `pdftotext` output per PDF build and
+uses nearby lines to break ties (earliest page wins remaining ties). fancy-cat
+and Sioyek highlight matches; Zathura pages through `gdbus`. Math/generated text
+may not match. In tmux, successful searches select the preview pane.
 
 ## Viewer keybindings
 
-Sioyek keeps its default bindings and adds:
+Sioyek adds `F5` inverse search, `i` dark colors, `a` fit width, `Ctrl-d/u`
+half-pages, `J/K` next/previous page, `H/L` page top/bottom, `'` mark, and
+`Ctrl-l` reload. Other defaults remain. Zathura uses stock bindings with
+clipboard selection, SyncTeX, incremental search, fit width, and a hidden status
+bar. Both reload automatically; sessions open separate previews.
 
-| Key | Action |
-|---|---|
-| `F5` | Inverse search at the mouse cursor |
-| `i` | Toggle dark colors |
-| `a` | Fit page width |
-| `Ctrl-d` / `Ctrl-u` | Half-page down / up |
-| `Shift-J` / `Shift-K` | Next / previous page |
-| `H` / `L` | Top / bottom of page |
-| `'` | Go to mark |
-| `Ctrl-l` | Reload |
-
-Zathura keeps stock bindings. Its config enables clipboard selection, SyncTeX,
-incremental search, and fit-to-width, with the status bar hidden. Both viewers
-reload automatically. Each hxp session opens its own preview window.
-
-Optional Sioyek dual-panel extension:
+Optional Sioyek dual-panel support:
 
 ```sh
 venv="${XDG_DATA_HOME:-$HOME/.local/share}/sioyek-extensions"
@@ -135,109 +114,88 @@ python3 -m venv "$venv"
 "$venv/bin/python" -m pip install sioyek
 ```
 
-Uncomment `_dual_panelify d` in `config/sioyek/keys_user.config` to bind `d`.
-Set `HXP_SIOYEK_VENV` to use another venv.
+Uncomment `_dual_panelify d` in `config/sioyek/keys_user.config`.
+Override the venv with `HXP_SIOYEK_VENV`.
 
-## Per-language behavior
+## Builds
 
-| Source | Build | Project root |
+| Source | Build | Root |
 |---|---|---|
 | `.md` | Pandoc → LaTeX → latexmk; direct Pandoc fallback without SyncTeX | Opened file |
-| `.tex` | `latexmk -pdf -synctex=1` | Opened file if it contains `\documentclass`; otherwise nearest `main.tex`, `root.tex`, or `thesis.tex` containing it |
-| `.typ` | `typst watch`, or `typst compile` when native watch is disabled | Nearest `main.typ`; `typst.toml` stops the upward search |
+| `.tex` | `latexmk -pdf -synctex=1` | Opened `\documentclass` source, or nearest `main.tex`, `root.tex`, `thesis.tex` containing it |
+| `.typ` | `typst watch` | Nearest `main.typ`; `typst.toml` stops upward search |
 
-The PDF lives beside the root source. LaTeX builds run from its directory so
-relative inputs resolve. Typst uses that directory as `--root`. PDFs are
-published atomically so existing readers retain a stable copy during builds.
+PDFs live beside the root. Builds run there; Typst uses it as `--root`.
+LaTeX defaults to pdflatex (`latexmkrc` can override); a sibling bibliography
+enables `-bibtex`. Source, bibliography, `.sty`, and `.cls` edits trigger rebuilds.
+`HXP_NO_NATIVE_TYP=1` uses full Typst rebuilds.
 
-### Markdown
+Markdown uses xelatex, lualatex, then pdflatex; supports `\(…\)`/`\[…\]` math
+and blue links. Frontmatter `bibliography:` overrides automatic loading of the
+first sibling `.bib`. `geometry:` overrides `HXP_MD_MARGIN` (default `0.75in`);
+use `2cm` or `top=2cm,left=3cm`, or empty for class defaults.
 
-- Supports `\(…\)` and `\[…\]` math; links are blue.
-- Uses xelatex, then lualatex, then pdflatex when available.
-- YAML `bibliography:` takes precedence; otherwise the first sibling `.bib`
-  is loaded automatically with citeproc.
-- Margins default to `0.75in`. `HXP_MD_MARGIN=2cm` sets all sides;
-  `HXP_MD_MARGIN="top=2cm,left=3cm"` sets geometry options. An empty value keeps
-  class defaults. Frontmatter `geometry:` overrides the environment.
-- CJK fonts are detected automatically. Override with `HXP_CJK_FONT` or
-  frontmatter `CJKmainfont:`.
+CJK fonts are detected once per watcher and loaded for Han, kana, or Hangul in
+the source or local bibliographies. Bibliography paths accept scalars/lists and
+resolve relative to the Markdown file. `HXP_CJK_FONT` or `CJKmainfont:` forces
+the chosen font.
 
-### LaTeX and Typst
+## Errors
 
-LaTeX uses pdflatex by default; configure other engines through `latexmkrc`.
-A sibling bibliography enables `-bibtex`. Included sources, `.bib`, `.sty`,
-and `.cls` changes trigger project rebuilds.
+Helix: `:open %sh{hxp-first-error}`. Micro: `Ctrl-e hxperror`.
+Markdown jumps are approximate; unmapped errors open the Markdown file, while
+errors without a source location have no jump target. `hxp_errs FILE` shows live
+diagnostics in another pane.
 
-Typst watches imported sources natively and renders error PDFs without LaTeX.
-Set `HXP_NO_NATIVE_TYP=1` for the generic full-rebuild loop.
-
-## Error reporting
-
-Bind `F8` to `:open %sh{hxp-first-error}` in Helix normal mode or
-`command:hxperror` in Micro to jump to the first reported source location.
-Markdown locations are approximate. If an error cannot be mapped to a Markdown
-line, F8 opens the Markdown file without moving the cursor. A compiler error
-without a source location has no jump target.
-
-Use `--keep-last-good` with `hxp` or `wpdf` to keep the last good PDF on
-failure. Diagnostics still appear in `hxp_errs`. Until a build succeeds, the
-preview shows an error PDF for the latest failure.
-
-By default, a failed build replaces the preview with an error PDF showing the primary
-message, source location, nearby text, and compiler extract. Markdown includes
-TeX context and an estimated Markdown location. `hxp_errs` displays the same
-status in a terminal pane, including a command to open the error location.
+Failures normally replace the preview with an error PDF containing the message,
+location, context, and log extract; Markdown adds generated TeX context.
+Typst renders these when available, otherwise Pandoc/LaTeX does.
+`--keep-last-good` keeps a good PDF and updates diagnostics. Before any successful
+build, it displays and refreshes error PDFs.
 
 ## Environment variables
 
 | Variable | Effect |
 |---|---|
-| `HXP_EDITOR` | `helix` (default) or `micro`; other values fall back to Helix |
-| `HXP_VIEWER` | GUI fallback preference (`zathura` or `sioyek`) |
-| `HXP_CJK_FONT` | Markdown CJK font family |
-| `HXP_MD_MARGIN` | Markdown geometry; default `0.75in` |
-| `HXP_NO_SPLIT=1` | Skip the fancy-cat split; use Zathura or Sioyek |
-| `HXP_KEEP_LAST_GOOD=1` | Enable `--keep-last-good` by default |
-| `HXP_NO_NATIVE_TYP=1` | Disable native Typst watch |
-| `HXP_NO_WATCHEXEC=1` | Use the inotify fallback |
-| `HXP_NO_TILE=1` | Disable GUI window placement |
+| `HXP_EDITOR` | `helix` (default/fallback) or `micro` |
+| `HXP_VIEWER` | GUI preference: `zathura` or `sioyek` |
+| `HXP_CJK_FONT` | Markdown CJK font |
+| `HXP_MD_MARGIN` | Geometry; default `0.75in` |
+| `HXP_NO_SPLIT=1` | Use a GUI viewer |
+| `HXP_KEEP_LAST_GOOD=1` | Preserve good PDFs on failure |
+| `HXP_NO_NATIVE_TYP=1` | Full Typst rebuilds |
+| `HXP_NO_WATCHEXEC=1` | Use inotifywait |
+| `HXP_NO_TILE=1` | Disable GUI placement |
 | `HXP_WM` | Force `tiling` or `floating` |
 | `HXP_SIOYEK_VENV` | Sioyek extensions venv |
-| `HXP_AWK` | Override the awk binary |
+| `HXP_AWK` | Awk binary |
 
-## GUI fallback windows
+## Runtime files
 
-On floating X11 desktops, `wmctrl` and `xprop` place the editor left and preview
-right. Tiling WMs handle placement themselves. On Wayland or without these
-tools, place windows manually; tmux inverse search still works.
-
-## Runtime & output files
+`<runtime>` means `${XDG_RUNTIME_DIR:-/tmp}/hxp`; keys are SHA-1 path hashes.
 
 | Path | Purpose |
 |---|---|
-| `<root-stem>.pdf` | Output; kept after exit |
-| `<src-dir>/.<stem>.error.log`, `.error.md` | Compiler log and error document |
-| `<src-dir>/.<stem>.debug.tex` | Markdown diagnostic intermediate |
-| `<src-dir>/.<stem>.tmp.pdf`, `.tmp.watch.pdf` | Atomic publication and native Typst staging |
-| `<src-dir>/.hxp_build_<stem>/` | latexmk output and Markdown `.hxp.tex` |
-| `<pdf-dir>/<root-stem>.synctex.gz` | Search data; removed on exit |
-| `${XDG_RUNTIME_DIR:-/tmp}/hxp/<sha1>.state` | Source, PDF, editor/viewer, pane/window IDs, and PIDs |
-| `<state>.buf` | Micro's last inverse-search buffer |
-| `${XDG_RUNTIME_DIR:-/tmp}/hxp/<sha1>.errpdf` | Marks a PDF that is currently an error page |
-| `<runtime>/hxp/viewer-launch.lock` | Persistent shared startup lock |
+| `<root-stem>.pdf` | Output, kept on exit |
+| `<src-dir>/.<stem>.error.log`, `.error.md`, `.debug.tex` | Diagnostics |
+| `<src-dir>/.<stem>.tmp.pdf`, `.tmp.watch.pdf` | Publication/staging |
+| `<src-dir>/.hxp_build_<stem>/` | latexmk output and `.hxp.tex` |
+| `<pdf-dir>/<root-stem>.synctex.gz` | Search data, removed on exit |
+| `<runtime>/<sha1>.state`, `.state.buf` | Session targets; Micro buffer |
+| `<runtime>/<sha1>.errpdf`, `.pdftext` | Error-page identity; cached PDF text |
+| `<runtime>/fonts/`, `errdoc.*/` | Error-page fonts and temporary reports |
+| `<runtime>/viewer-launch.lock` | Shared startup lock |
 
-Scratch files left after a crash can be deleted; the next session recreates them.
+Crash leftovers may be deleted; sessions recreate them.
 
 ## tmux restore
 
-`hxp-sessions` lists live sessions, one per line, tab-separated:
-`TMUX_SOCKET TMUX_PANE EDITOR VIEWER VIEWER_SOCKET SOURCE`. A tmux-resurrect
-save hook saves each session's editor pane as a shell and its fancy-cat pane as
-`hxp-resume PANE_INDEX EDITOR SOURCE`; add `hxp-resume` to `@resurrect-processes`.
-On restore it waits while the server option `@resurrect-restoring` is 1 and for
-a Ghostty client, then restarts the editor pane running hxp once its shell is
-idle. While it waits, its pane option `@hxp-resume` holds
-`EDITOR_PANE_ID EDITOR SOURCE`, so a save can write the editor's current index.
+`hxp-sessions` emits tab-separated `TMUX_SOCKET TMUX_PANE EDITOR VIEWER
+VIEWER_SOCKET SOURCE`. The tmux-resurrect save hook stores editor panes as shells
+and fancy-cat panes as `hxp-resume PANE_INDEX EDITOR SOURCE`; add `hxp-resume` to
+`@resurrect-processes`. Restore waits for `@resurrect-restoring` to clear and a
+Ghostty client, then restarts hxp in an idle editor pane. While waiting,
+`@hxp-resume` holds `EDITOR_PANE_ID EDITOR SOURCE` for subsequent saves.
 
 ## Troubleshooting
 
@@ -245,49 +203,48 @@ Start with `hxp --doctor`.
 
 | Problem | Check |
 |---|---|
-| Preview does not update | Install watch tools; try `HXP_NO_WATCHEXEC=1` |
-| Inverse search opens another editor | Launch inside tmux, or install `xdotool`; check helpers on `PATH` |
-| Ghostty inverse search types into the preview | Bind `ctrl+shift+h=goto_split:left`; keep only the editor and preview splits |
-| Markdown search fails | Install `latexmk`; Markdown needs generated SyncTeX data |
-| Typst search is inaccurate | Text matching is approximate; install `pdftotext` and, for Zathura, `gdbus` |
-| CJK text is missing | Install `fonts-noto-cjk` or set `HXP_CJK_FONT` |
-| Micro reports unknown `hxpfwd` | Re-run `install.sh` and add the keybinding |
-| A Micro jump types commands into the document | Undo and check that `Ctrl-e` is bound to `CommandMode` |
-| Search selects another Zathura window | Restart hxp from a new shell after updating |
-| Sioyek reuses another session's window | Remove custom single-window overrides |
+| No updates | Watch tools; try `HXP_NO_WATCHEXEC=1` |
+| Wrong/new editor | Use tmux or `xdotool`; check helper `PATH` |
+| tmux Ctrl+click fails | Add the mouse binding above, or use Ctrl+L |
+| fancy-cat Ctrl+L fails | Update the fork and restart hxp |
+| `NoLiveSourceSession` | Restart hxp |
+| `AmbiguousSourceText` | Choose distinctive prose |
+| Ghostty types into preview | Add the left-focus binding; keep two splits |
+| Markdown search fails | Install latexmk |
+| Typst search fails | Install `pdftotext`; Zathura also needs `gdbus` |
+| Missing CJK | Install `fonts-noto-cjk` or set `HXP_CJK_FONT` |
+| Unknown Micro `hxpfwd` | Rerun installer; add binding |
+| Micro jump inserts commands | Undo; bind `Ctrl-e` to `CommandMode` |
+| Wrong Zathura preview | Restart hxp from a freshly loaded shell |
+| Sioyek reuses a window | Remove single-window overrides |
 
 ## Development
 
 ```sh
 zsh test/parse-test.zsh
 zsh test/workflow-test.zsh
+python3 -B test/inverse-test.py
+python3 -B test/search-tmux-test.py
 zsh test/smoke.zsh
 bash test/sessions-test.sh
-bash test/resume-test.sh   # needs tmux
+bash test/resume-test.sh
 ```
 
-Parser, workflow, and session tests need no compilers or GUI. Smoke tests
-compile each available language and exercise native Typst watch. CI runs them all.
-
-`zsh/hxp-main.zsh` owns sessions and windows; `zsh/hxp-lib.zsh` handles builds,
-errors, and diagnostics. `bin/hxp-compile` serves the watcher; `hxp-jump` and
-`hxp-fwd` handle search, using `hxp-mdline`, `hxp-texline`, and `hxp-typtext`.
-`hxp-sessions` and `hxp-resume` serve tmux restore. Micro's adapter is in
-`config/micro/plug/hxpfwd/`.
+CI runs all suites. Smoke tests compile available languages; tmux tests use
+private servers and exercise installed editors. `zsh/hxp-main.zsh` owns sessions;
+`hxp-lib.zsh` handles builds/errors. Search and restore helpers live in `bin/`;
+Micro integration is in `config/micro/plug/hxpfwd/`.
 
 ## Uninstall
 
-Remove the installed symlinks and the source line from `~/.zshrc`:
+Remove the source line from `~/.zshrc` and these symlinks; restore backups as needed:
 
 ```sh
 rm -f ~/.zsh/hxp-main.zsh ~/.zsh/hxp-lib.zsh \
       ~/.local/bin/hxp-compile ~/.local/bin/hxp-first-error ~/.local/bin/hxp-jump \
-      ~/.local/bin/hxp-mdline ~/.local/bin/hxp-fwd \
+      ~/.local/bin/hxp-inverse ~/.local/bin/hxp-mdline ~/.local/bin/hxp-fwd \
       ~/.local/bin/hxp-texline ~/.local/bin/hxp-typtext \
       ~/.local/bin/hxp-dual-panelify ~/.local/bin/hxp-sessions ~/.local/bin/hxp-resume \
-      ~/.config/zathura/zathurarc \
-      ~/.config/sioyek/prefs_user.config ~/.config/sioyek/keys_user.config \
-      ~/.config/micro/plug/hxpfwd
+      ~/.config/zathura/zathurarc ~/.config/sioyek/prefs_user.config \
+      ~/.config/sioyek/keys_user.config ~/.config/micro/plug/hxpfwd
 ```
-
-Restore any installer backups you want to keep.

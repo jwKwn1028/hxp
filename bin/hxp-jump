@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Usage: hxp-jump <file>:<line>[:<col>]
-# Drive the session editor via tmux, X11 keystrokes, or a new process.
 
 set -u
 
@@ -9,12 +8,18 @@ guess_md_line() {
   hxp-mdline "$1" "$2" "$3"
 }
 
-# Session state overrides this environment fallback.
 editor="helix"
 [[ "${HXP_EDITOR:-}" == "micro" ]] && editor="micro"
 
 spawn_editor() {
   local file="$1" line="${2:-}" col="${3:-}"
+  # Terminal editors cannot start from GUI callbacks.
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    local message="no reachable editor for ${file}${line:+:$line}; run hxp in tmux or keep its editor open"
+    command -v notify-send >/dev/null 2>&1 && notify-send "hxp-jump" "$message" 2>/dev/null
+    printf 'hxp-jump: %s\n' "$message" >&2
+    exit 1
+  fi
   case "$editor" in
     micro)
       if [[ -n "$line" ]]; then
@@ -37,8 +42,12 @@ shquote() {
 
 target="${1:-}"
 [[ -z "$target" ]] && exit 1
+if [[ "$target" =~ [[:cntrl:]] ]]; then
+  printf 'hxp-jump: control characters are not supported in source locations\n' >&2
+  exit 2
+fi
 
-# Parse positions from the right so paths may contain colons.
+# Paths may contain colons; parse from the right.
 if [[ "$target" =~ ^(.+):([0-9]+):([0-9]+)$ ]]; then
   file="${BASH_REMATCH[1]}"
   line="${BASH_REMATCH[2]}"
@@ -48,10 +57,13 @@ elif [[ "$target" =~ ^(.+):([0-9]+)$ ]]; then
   line="${BASH_REMATCH[2]}"
   col=""
 else
+  if [[ -n "${HXP_PREVIEW_SRC:-}" ]]; then
+    printf 'hxp-jump: source location has no line number\n' >&2
+    exit 2
+  fi
   spawn_editor "$target"
 fi
 
-# Map Pandoc intermediates back to Markdown.
 if [[ "$file" == *.hxp.tex ]]; then
   dir_part="${file%/*}"
   base_part="${file##*/}"
@@ -77,14 +89,25 @@ realfile="$(realpath -m -- "$file" 2>/dev/null || printf '%s' "$file")"
 state_dir="${XDG_RUNTIME_DIR:-/tmp}/hxp"
 state_key="$(printf '%s' "$realfile" | sha1sum | cut -d' ' -f1)"
 state_file="$state_dir/$state_key.state"
+# Pin fancy-cat previews only; GUI viewers may be shared.
+if [[ -n "${HXP_PREVIEW_SRC:-}" ]]; then
+  session_src="$(realpath -m -- "$HXP_PREVIEW_SRC")"
+  state_key="$(printf '%s' "$session_src" | sha1sum | cut -d' ' -f1)"
+  state_file="$state_dir/$state_key.state"
+fi
 
-# Reject stale sessions before sending editor keystrokes.
 pid_alive() {
   [[ -n "${1:-}" ]] || return 1
-  kill -0 "$1" 2>/dev/null
+  [[ "$1" =~ ^[1-9][0-9]*$ ]] && kill -0 "$1" 2>/dev/null || return 1
+  if [[ -n "${state_pid_start:-}" ]]; then
+    local stat
+    IFS= read -r stat < "/proc/$1/stat" || return 1
+    stat="${stat##*) }"
+    read -r -a fields <<< "$stat"
+    [[ "${fields[19]:-}" == "$state_pid_start" ]] || return 1
+  fi
 }
 
-# Forget a session's editor and preview targets.
 clear_targets() {
   tmux_socket=""
   tmux_pane=""
@@ -97,6 +120,7 @@ clear_targets() {
 read_state() {
   clear_targets
   state_pid=""
+  state_pid_start=""
   state_src=""
   [[ -r "$1" ]] || return 1
   while IFS='=' read -r k v; do
@@ -109,6 +133,7 @@ read_state() {
       viewer)    state_viewer="$v" ;;
       editor)    state_editor="$v" ;;
       pid)       state_pid="$v" ;;
+      pid_start) state_pid_start="$v" ;;
     esac
   done < "$1"
 }
@@ -120,8 +145,13 @@ if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
   clear_targets
 fi
 
-# Included sources may belong to a session higher in the directory tree.
-if [[ -z "$tmux_pane" && -z "$window_id" ]]; then
+if [[ -n "${HXP_PREVIEW_SRC:-}" ]] && { [[ "$state_src" != "$session_src" ]] || ! pid_alive "$state_pid"; }; then
+  printf 'hxp-jump: originating session is unavailable\n' >&2
+  exit 1
+fi
+
+# Search ancestor sessions only for unpinned previews.
+if [[ -z "${HXP_PREVIEW_SRC:-}" && -z "$tmux_pane" && -z "$window_id" ]]; then
   reported_dir="$(dirname "$realfile")"
   for sf in "$state_dir"/*.state; do
     [[ -r "$sf" && "$sf" != "$state_file" ]] || continue
@@ -136,7 +166,6 @@ if [[ -z "$tmux_pane" && -z "$window_id" ]]; then
     sf_dir="$(dirname "$(realpath -m -- "$state_src" 2>/dev/null || printf '%s' "$state_src")")"
     case "$reported_dir" in
       "$sf_dir"|"$sf_dir"/*)
-        # Keep buffer tracking with the selected session.
         state_file="$sf"
         break ;;
     esac
@@ -152,7 +181,7 @@ esac
 target_str="$realfile:$line"
 [[ -n "$col" ]] && target_str="$target_str:$col"
 
-# Track the current Micro buffer; reopening it discards undo history.
+# Reopening Micro buffers discards undo history.
 buf_file="$state_file.buf"
 current_buf=""
 [[ -r "$buf_file" ]] && IFS= read -r current_buf < "$buf_file"
@@ -166,10 +195,16 @@ remember_buffer() {
   printf '%s\n' "$realfile" >| "$buf_file" 2>/dev/null || true
 }
 
-# Pause after Escape so Micro does not read the next key as an Alt sequence.
+# Micro needs an Escape/Alt disambiguation pause.
 ESC_SETTLE=0.1
 
-tsend() { TMUX="$tmux_socket" tmux send-keys -t "$tmux_pane" "$@" 2>/dev/null; }
+tmux_cmd() { tmux -S "${tmux_socket%%,*}" "$@"; }
+tsend() { tmux_cmd send-keys -t "$tmux_pane" "$@" 2>/dev/null; }
+type_command() { tsend -l -- "$1" && tsend Enter; }
+helix_quote() {
+  # Helix doubles literal single quotes.
+  printf "'%s'" "${1//\'/\'\'}"
+}
 
 drive_tmux() {
   case "$editor" in
@@ -178,28 +213,30 @@ drive_tmux() {
       sleep "$ESC_SETTLE"
       if (( need_open )); then
         tsend C-e || return 1
-        tsend "open $(shquote "$realfile")" Enter || return 1
+        # Micro unquotes filenames twice.
+        type_command "open $(shquote "$(shquote "$realfile")")" || return 1
         sleep "$ESC_SETTLE"
       fi
       tsend C-e || return 1
-      tsend "goto $line${col:+:$col}" Enter || return 1
+      type_command "goto $line${col:+:$col}" || return 1
       ;;
     *)
-      tsend Escape Escape || return 1
-      tsend ":open $target_str" Enter || return 1
+      tmux_cmd send-keys -t "$tmux_pane" Escape Escape \; \
+        send-keys -l -t "$tmux_pane" -- ":open $(helix_quote "$target_str")" \; \
+        send-keys -t "$tmux_pane" Enter 2>/dev/null || return 1
       ;;
   esac
 }
 
-if [[ -n "$tmux_pane" ]] && command -v tmux >/dev/null 2>&1; then
+if [[ -n "$tmux_socket" && "$tmux_pane" =~ ^%[0-9]+$ ]] && command -v tmux >/dev/null 2>&1; then
   if drive_tmux; then
     remember_buffer
-    TMUX="$tmux_socket" tmux select-pane -t "$tmux_pane" >/dev/null 2>&1 || true
+    tmux_cmd select-pane -t "$tmux_pane" >/dev/null 2>&1 || true
     exit 0
   fi
 fi
 
-# X11 fallback; xdotool needs a decimal window ID.
+# xdotool needs decimal window IDs.
 if [[ "$window_id" == 0x* ]]; then
   window_id=$(printf '%d' "$window_id" 2>/dev/null) || window_id=""
 fi
@@ -208,7 +245,7 @@ if [[ -n "$window_id" ]] && command -v xdotool >/dev/null 2>&1; then
   sleep 0.05
 
   if [[ "$ghostty_split" == 1 ]]; then
-    # Recheck focus before each keystroke to avoid typing in another window.
+    # Recheck focus before each keystroke.
     active_editor_window() { [[ "$(xdotool getactivewindow)" == "$window_id" ]]; }
     xkey() { active_editor_window && xdotool key --clearmodifiers "$@"; }
     xtype() { active_editor_window && xdotool type --clearmodifiers --delay 0 "$1"; }
@@ -226,7 +263,7 @@ if [[ -n "$window_id" ]] && command -v xdotool >/dev/null 2>&1; then
       if (( need_open )); then
         xkey ctrl+e
         sleep 0.02
-        xtype "open $(shquote "$realfile")" && xkey Return
+        xtype "open $(shquote "$(shquote "$realfile")")" && xkey Return
         sleep "$ESC_SETTLE"
       fi
       xkey ctrl+e
@@ -236,13 +273,13 @@ if [[ -n "$window_id" ]] && command -v xdotool >/dev/null 2>&1; then
     *)
       xkey Escape Escape
       sleep 0.02
-      xtype ":open $target_str" && xkey Return && exit 0
+      xtype ":open $(helix_quote "$target_str")" && xkey Return && exit 0
       ;;
   esac
 fi
 
-# fancy-cat runs this helper inside the preview; a new editor would land there.
-if [[ "$state_viewer" == fancy-cat ]]; then
+# Never spawn an editor in the preview pane.
+if [[ "$state_viewer" == fancy-cat || -n "${HXP_PREVIEW_SRC:-}" ]]; then
   printf 'hxp-jump: could not reach the session editor\n' >&2
   exit 1
 fi

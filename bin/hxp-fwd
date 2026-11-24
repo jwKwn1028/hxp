@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Usage: hxp-fwd <source-file> <line> [col]
-# Forward search using session state, SyncTeX, or Typst page text.
 
 set -u
 
@@ -13,6 +12,9 @@ if [[ -z "$src" || -z "$line" ]]; then
   exit 2
 fi
 [[ -z "$col" ]] && col=1
+
+# Helix supplies quoted ~/ paths.
+[[ "$src" == \~/* ]] && src="$HOME/${src#\~/}"
 
 warn() {
   command -v notify-send >/dev/null 2>&1 && notify-send "hxp-fwd" "$1" 2>/dev/null
@@ -37,6 +39,7 @@ state_viewer_windowid=""; state_window_known=0
 
 read_state() {
   state_socket=""; state_src=""; state_pdf=""; state_viewer=""; state_pid=""
+  state_tmux=""; state_viewer_pane=""
   state_viewer_pid=""
   state_viewer_windowid=""; state_window_known=0
   [[ -r "$1" ]] || return 1
@@ -46,6 +49,8 @@ read_state() {
       pdf)    state_pdf="$v" ;;
       viewer) state_viewer="$v" ;;
       viewer_socket) state_socket="$v" ;;
+      tmux) state_tmux="$v" ;;
+      viewer_pane) state_viewer_pane="$v" ;;
       viewer_pid) state_viewer_pid="$v" ;;
       viewer_windowid) state_viewer_windowid="$v"; state_window_known=1 ;;
       pid)    state_pid="$v" ;;
@@ -66,7 +71,7 @@ if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
   state_viewer_windowid=""; state_window_known=0
 fi
 
-# Included sources may use a session higher in the directory tree.
+# Included sources can use ancestor sessions.
 if [[ -z "$state_pdf" ]]; then
   for sf in "$state_dir"/*.state; do
     [[ -r "$sf" && "$sf" != "$state_file" ]] || continue
@@ -120,12 +125,31 @@ sync_col="$col"
 search_page=""
 focus_text=""
 
-# Extract once; normalize typeset line breaks before matching phrases.
+# Cache page text by PDF identity; rebuilds replace the file.
+pdf_text() {
+  local cache id cached tmp
+  cache="$state_dir/$(printf '%s' "$pdf" | sha1sum | cut -d' ' -f1).pdftext"
+  id="$(stat -c '%d:%i:%s:%y' -- "$pdf" 2>/dev/null)" || return 1
+  if [[ -r "$cache" ]] && IFS= read -r cached < "$cache" && [[ "$cached" == "$id" ]]; then
+    tail -n +2 -- "$cache"
+    return 0
+  fi
+  mkdir -p -- "$state_dir" 2>/dev/null
+  tmp="$cache.$$"
+  if { printf '%s\n' "$id" && pdftotext -q "$pdf" - 2>/dev/null; } > "$tmp" &&
+     [[ "$(stat -c '%d:%i:%s:%y' -- "$pdf" 2>/dev/null)" == "$id" ]] && mv -f -- "$tmp" "$cache"; then
+    tail -n +2 -- "$cache"
+    return 0
+  fi
+  rm -f -- "$tmp"
+  pdftotext -q "$pdf" - 2>/dev/null
+}
+
 typst_search_page() {
   command -v pdftotext >/dev/null 2>&1 || return 1
   command -v hxp-typtext >/dev/null 2>&1 || return 1
 
-  pdftotext -q "$pdf" - 2>/dev/null | awk '
+  pdf_text | awk '
     FILENAME == ARGV[1] {
       tab = index($0, "\t")
       if (!tab) next
@@ -171,7 +195,6 @@ case "$ext" in
       sync_line="$mapped"
       sync_col=1
     else
-      # An unmapped Markdown line is not a valid TeX position.
       sync_file=""
     fi
     ;;
@@ -184,11 +207,9 @@ case "$ext" in
     ;;
 esac
 
-# Shared Sioyek processes may name only their first document.
 viewer="$state_viewer"
 [[ -z "$viewer" ]] && viewer="${HXP_VIEWER:-}"
 if [[ -z "$viewer" ]]; then
-  # Match paths literally, not as pgrep patterns.
   if pgrep -a zathura 2>/dev/null | grep -qF -- "$pdf"; then
     viewer=zathura
   elif pgrep -a sioyek 2>/dev/null | grep -qF -- "$pdf"; then
@@ -211,14 +232,19 @@ if [[ "$viewer" == fancy-cat ]]; then
     exit 1
   fi
   if [[ -n "$sync_file" ]]; then
-    exec fancy-cat --remote "$state_socket" forward-search "$sync_file" "$sync_line" "$sync_col"
+    fancy-cat --remote "$state_socket" forward-search "$sync_file" "$sync_line" "$sync_col" || exit 1
   elif [[ -n "$search_page" ]]; then
-    exec fancy-cat --remote "$state_socket" goto-page "$search_page" "$focus_text"
+    fancy-cat --remote "$state_socket" goto-page "$search_page" "$focus_text" || exit 1
+  else
+    warn "no searchable PDF position for this source line"
+    exit 1
+  fi
+  if [[ -n "$state_tmux" && "$state_viewer_pane" =~ ^%[0-9]+$ ]] && command -v tmux >/dev/null 2>&1; then
+    tmux -S "${state_tmux%%,*}" select-pane -t "$state_viewer_pane" >/dev/null 2>&1 || true
   fi
   exit 0
 fi
 
-# Pin Zathura searches to our process, even without an X11 window ID.
 zathura_pid_args=()
 if [[ "$viewer" == zathura && -n "$state_pdf" ]]; then
   if [[ ! "$state_viewer_pid" =~ ^[1-9][0-9]*$ ]]; then
@@ -228,7 +254,7 @@ if [[ "$viewer" == zathura && -n "$state_pdf" ]]; then
   zathura_pid_args=(--synctex-pid "$state_viewer_pid")
 fi
 
-# Use recorded ownership; legacy title matching must be unambiguous.
+# Legacy title matching must be unambiguous.
 raise_viewer_window() {
   command -v wmctrl >/dev/null 2>&1 || return 1
   local want="${pdf##*/}" id
@@ -253,7 +279,7 @@ raise_viewer_window() {
   return 0
 }
 
-# Use D-Bus GotoPage (0-based); --page would open another window.
+# D-Bus pages in place; --page opens a new window.
 zathura_goto_page() {
   command -v gdbus >/dev/null 2>&1 || return 1
   local names n fname
@@ -281,21 +307,18 @@ zathura_goto_page() {
 raised=0
 raise_viewer_window && raised=1
 
-# No usable position: raising the viewer is enough.
 if [[ -z "$sync_file" && -z "$search_page" ]]; then
   (( raised )) && exit 0
 fi
 
 case "$viewer" in
   sioyek)
-    # Reuse only after focusing the owned window.
     if (( raised )); then
       win_flag=--reuse-window
     else
       win_flag=--new-window
     fi
     if [[ -n "$sync_file" ]]; then
-      # Keep inverse_search_command from the shared viewer config.
       sioyek "$win_flag" \
              --forward-search-file "$sync_file" \
              --forward-search-line "$sync_line" \
@@ -313,12 +336,12 @@ case "$viewer" in
     disown
     ;;
   zathura|*)
-    # A missing preview must not redirect or spawn another window.
+    # Never redirect an owned session to another preview.
     if [[ -n "$sync_file" ]]; then
       zathura "${zathura_pid_args[@]}" --synctex-forward "$sync_line:$sync_col:$sync_file" "$pdf" >/dev/null 2>&1 &
       disown
     elif [[ -n "$search_page" ]] && zathura_goto_page "$search_page"; then
-      : # delivered over D-Bus to the running instance; no new process
+      :
     elif [[ -n "$state_viewer_pid" ]]; then
       if [[ -n "$search_page" ]]; then
         warn "could not page this session's Zathura preview"

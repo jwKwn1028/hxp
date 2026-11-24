@@ -1,12 +1,12 @@
 #!/usr/bin/env zsh
-# Compile success, failure, and watch recovery; skip missing toolchains.
+# Build and watch regressions; skip unavailable toolchains.
 
 emulate -L zsh
 set -u
 
 repo="${0:A:h:h}"
 source "$repo/zsh/hxp-lib.zsh"
-export PATH="$repo/bin:$PATH"          # make hxp-mdline resolvable
+export PATH="$repo/bin:$PATH"
 
 typeset -g fail=0
 typeset -ga skips
@@ -22,7 +22,7 @@ is_pdf() { [[ -s "$1" ]] && head -c5 -- "$1" 2>/dev/null | grep -q '%PDF' }
 
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
-export XDG_RUNTIME_DIR="$work/runtime"   # keep error-page markers private
+export XDG_RUNTIME_DIR="$work/runtime"
 
 compile() {  # src ext
   local src="$1" ext="$2" dir="${1:h}" stem="${${1:t}:r}"
@@ -43,9 +43,41 @@ if _hxp_need_cmd pandoc; then
   compile "$d/a.md" md; rc=$?
   check "md bad rc"        1 "$rc"
   check "md bad error pdf" 1 "$(is_pdf "$d/a.pdf" && echo 1 || echo 0)"
+  check 'md error report keeps TeX backslashes' yes \
+    "$(grep -qF -- '\undefinedcontrolsequence' "$d/.a.error.md" && print yes || print no)"
+  if _hxp_need_cmd typst; then
+    check 'md error page is rendered by Typst' yes "$(grep -aq 'Typst' "$d/a.pdf" && print yes || print no)"
+  fi
+
+  if _hxp_need_cmd xelatex && _hxp_need_cmd pdftotext && cjk_font="$(_hxp_cjk_font)"; then
+    (
+      # Only the nested bibliography contains CJK.
+      d="$work/md-cjk-bibliography"
+      mkdir -p "$d/references with spaces"
+      print -rl -- '@book{korean,' '  author = {Kim, Jisu},' '  title = {한국어 제목},' '  year = {2021}' '}' > "$d/references with spaces/refs.bib"
+      print -rl -- '---' 'bibliography: "references with spaces/refs.bib"' '---' \
+        'An English document citing a book [@korean].' > "$d/notes.md"
+      unset HXP_CJK_FONT
+      export HXP_CJK_FONT_RESOLVED="$cjk_font"
+      compile "$d/notes.md" md; rc=$?
+      check 'configured CJK bibliography compiles' 0 "$rc"
+      check 'configured bibliography keeps Korean glyphs in the PDF' yes \
+        "$(pdftotext -q "$d/notes.pdf" - | grep -qF '한국어 제목' && print yes || print no)"
+      if _hxp_need_cmd latexmk; then
+        _hxp_need_cmd() { [[ "$1" != latexmk ]] && command -v "$1" >/dev/null 2>&1 }
+        compile "$d/notes.md" md; rc=$?
+        check 'Pandoc-direct CJK bibliography compiles' 0 "$rc"
+        check 'Pandoc-direct bibliography keeps Korean glyphs' yes \
+          "$(pdftotext -q "$d/notes.pdf" - | grep -qF '한국어 제목' && print yes || print no)"
+      fi
+      exit "$fail"
+    ) || fail=1
+  else
+    skips+=(CJK-bibliography)
+  fi
 
   if _hxp_need_cmd latexmk; then
-    # TeX wraps its log at 79 columns by default; a deep path would split.
+    # Exercise paths exceeding TeX's 79-column log default.
     d="$work/md/deep-$(printf '%080d' 0)"; mkdir -p "$d"
     print -rl -- '# Bad' '' 'text \undefinedcontrolsequence more' >| "$d/a.md"
     compile "$d/a.md" md
@@ -63,13 +95,47 @@ if _hxp_need_cmd latexmk; then
   compile "$d/a.tex" tex; rc=$?
   check "tex good rc"  0 "$rc"
   check "tex good pdf" 1 "$(is_pdf "$d/a.pdf" && echo 1 || echo 0)"
+  sidecar_inode="$(stat -c %i -- "$d/a.synctex.gz" 2>/dev/null)"
+  compile "$d/a.tex" tex
+  check 'tex SyncTeX sidecar is replaced, not overwritten' yes \
+    "$([[ -s "$d/a.synctex.gz" && "$(stat -c %i -- "$d/a.synctex.gz")" != "$sidecar_inode" ]] && print yes || print no)"
+  check 'tex rebuild runs one LaTeX pass' 1 "$(grep -c '^Latexmk: applying rule' "$d/.a.error.log" 2>/dev/null)"
 
   print -rl -- '\documentclass{article}' '\begin{document}' '\undefinedcontrolsequence' '\end{document}' >| "$d/a.tex"
   compile "$d/a.tex" tex; rc=$?
   check "tex bad rc"        1 "$rc"
   check "tex bad error pdf" 1 "$(is_pdf "$d/a.pdf" && echo 1 || echo 0)"
+  if _hxp_need_cmd typst; then
+    check 'tex error page is rendered by Typst' yes "$(grep -aq 'Typst' "$d/a.pdf" && print yes || print no)"
+    if _hxp_need_cmd pdftotext; then
+      check 'tex error page names the error' yes \
+        "$(pdftotext -q "$d/a.pdf" - | grep -q 'Undefined control sequence' && print yes || print no)"
+      (
+        # Both reports must share zsh's $$.
+        d="$work/concurrent-error-pdfs"
+        mkdir -p "$d"
+        for name in alpha beta; do
+          print -r -- "Source for $name" > "$d/$name.tex"
+          print -r -- "$d/$name.tex:1: Diagnostic for $name." > "$d/$name.log"
+        done
+        _hxp_make_error_pdf "$d/alpha.tex" tex "$d/alpha.log" "$d/alpha.md" "$d/alpha.pdf" '' "$d/alpha.final.pdf" &
+        a_pid=$!
+        _hxp_make_error_pdf "$d/beta.tex" tex "$d/beta.log" "$d/beta.md" "$d/beta.pdf" '' "$d/beta.final.pdf" &
+        b_pid=$!
+        wait "$a_pid"; check 'first concurrent error PDF renders' 0 "$?"
+        wait "$b_pid"; check 'second concurrent error PDF renders' 0 "$?"
+        for name in alpha beta; do
+          text="$(pdftotext -q "$d/$name.pdf" -)"
+          other=alpha; [[ "$name" == alpha ]] && other=beta
+          check "$name PDF retains its own diagnostic and location" yes \
+            "$([[ "$text" == *"Diagnostic for $name."* && "$text" == *"$name.tex:1"* && \
+                  "$text" != *"Diagnostic for $other."* ]] && print yes || print no)"
+        done
+        exit "$fail"
+      ) || fail=1
+    fi
+  fi
 
-  # Included sources must build from the project root.
   d="$work/tex project"; mkdir -p "$d/chapters"
   print -rl -- '\documentclass{article}' '\begin{document}' '\input{chapters/intro}' '\end{document}' >| "$d/main.tex"
   print -r -- 'Included chapter.' >| "$d/chapters/intro.tex"
@@ -89,7 +155,6 @@ if _hxp_need_cmd typst; then
   check "typ good rc"  0 "$rc"
   check "typ good pdf" 1 "$(is_pdf "$d/a.pdf" && echo 1 || echo 0)"
 
-  # Publishing must preserve readers of the previous PDF.
   old_digest="$(sha256sum < "$d/a.pdf")"
   exec {reader_fd}< "$d/a.pdf"
   print -rl -- '= Updated' '' 'New content after saving.' >| "$d/a.typ"
@@ -108,7 +173,7 @@ if _hxp_need_cmd typst; then
   check "typ bad rc"        1 "$rc"
   check "typ bad error pdf" 1 "$(is_pdf "$d/a.pdf" && echo 1 || echo 0)"
 
-  # Until a build succeeds, last-good mode keeps the error page current.
+  # Refresh errors until the first successful build.
   d="$work/typ first failure"; mkdir -p "$d"
   print -rl -- '= Bad' '#let x =' >| "$d/a.typ"
   HXP_KEEP_LAST_GOOD=1 compile "$d/a.typ" typ
@@ -148,7 +213,22 @@ if _hxp_need_cmd typst; then
   check "watch fail -> error pdf"  1 "$(is_pdf "$pdf" && echo 1 || echo 0)"
   check "watch fail -> err_log"    1 "$(grep -q 'expected expression' "$errlog" && echo 1 || echo 0)"
 
-  # Retain watch output to recover from errors without re-exporting.
+  # Render errors while the watch pipe stays open.
+  zmodload zsh/datetime
+  rm -f -- "$pdf"
+  started=$EPOCHREALTIME
+  {
+    print -rl -- \
+      'watching t.typ' 'writing to t.pdf' '' '[14:08:24] compiled with errors' '' \
+      'error: expected expression' '  ┌─ t.typ:2:8' '  │' '2 │ #let x =' '  │         ^'
+    sleep 1
+  } | _hxp_typst_watch_render "$src" typ "$errlog" "$errmd" "$tmp" "$dtex" "$pdf" &
+  while (( EPOCHREALTIME - started < 1 )) && ! is_pdf "$pdf"; do sleep 0.01; done
+  rendered=$(( EPOCHREALTIME - started ))
+  wait
+  check 'watch fail renders while typst keeps running' yes \
+    "$(is_pdf "$pdf" && (( rendered < 0.5 )) && print yes || printf 'no (%.2f s)' "$rendered")"
+
   watch_pdf="${tmp:r}.watch.pdf"
   print -rl -- '= Watch snapshot' 'Completed output.' >| "$d2/good.typ"
   typst compile "$d2/good.typ" "$watch_pdf"

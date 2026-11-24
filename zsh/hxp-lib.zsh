@@ -1,12 +1,28 @@
-# Compile and search helpers; keep independent of .zshrc.
+# Build and search helpers.
 
 _hxp_need_cmd() { command -v "$1" >/dev/null 2>&1 }
 _hxp_abs() { print -r -- "${1:A}" }
 
-# Keep awk programs POSIX-compatible; HXP_AWK selects the test binary.
+if ! zmodload -F zsh/files b:zf_mv b:zf_rm b:zf_mkdir 2>/dev/null; then
+  zf_mv() { command mv "$@" }
+  zf_rm() { command rm "$@" }
+  zf_mkdir() { command mkdir "$@" }
+fi
+# zf_mv cannot cross filesystems.
+_hxp_mv() { zf_mv -f -- "$1" "$2" 2>/dev/null || command mv -f -- "$1" "$2" }
+
+# Use POSIX awk; HXP_AWK selects the binary.
 _hxp_awk() {
-  if [[ -n "$HXP_AWK" ]]; then print -r -- "$HXP_AWK"; return; fi
-  if _hxp_need_cmd gawk; then print -r -- gawk; else print -r -- awk; fi
+  local REPLY
+  _hxp_awk_reply
+  print -r -- "$REPLY"
+}
+
+# Set REPLY to the awk binary.
+_hxp_awk_reply() {
+  if [[ -n "$HXP_AWK" ]]; then REPLY="$HXP_AWK"
+  elif _hxp_need_cmd gawk; then REPLY=gawk
+  else REPLY=awk; fi
 }
 
 _hxp_gui_viewer() {
@@ -18,7 +34,7 @@ _hxp_gui_viewer() {
   return 1
 }
 
-# Succeed when a fancy-cat split can open; otherwise print why not.
+# Print why splitting is unavailable.
 _hxp_split_check() {
   emulate -L zsh
   local why=""
@@ -42,6 +58,10 @@ _hxp_split_check() {
   return 1
 }
 
+_hxp_fancy_cat_has_resolver() {
+  fancy-cat --help 2>&1 | grep -q -- '--inverse-search-resolver'
+}
+
 _hxp_viewer() {
   if _hxp_split_check >/dev/null; then print -r -- fancy-cat; return 0; fi
   _hxp_gui_viewer
@@ -59,7 +79,7 @@ _hxp_editor_bin() {
   esac
 }
 
-# Emit editor argv, one argument per line; omit empty positions.
+# One argument per line; omit empty positions.
 _hxp_editor_argv() {
   emulate -L zsh
   local editor="$1" file="$2" line="$3" col="$4"
@@ -87,20 +107,19 @@ _hxp_editor_argv() {
 
 _hxp_editor_open() {
   emulate -L zsh
-  # Avoid local argv: zsh aliases it to the positional parameters.
+  # argv aliases zsh positional parameters.
   local -a cmd
   cmd=( "${(@f)$(_hxp_editor_argv "$@")}" )
   "${cmd[@]}"
 }
 
-# Hash without a trailing newline to match the bash search helpers.
+# Match bash helpers: hash without a newline.
 _hxp_state_file() {
   emulate -L zsh
   local key; key="$(printf '%s' "$1" | sha1sum | cut -d' ' -f1)"
   print -r -- "${XDG_RUNTIME_DIR:-/tmp}/hxp/$key.state"
 }
 
-# Use the session editor for error hints, then fall back to HXP_EDITOR.
 _hxp_session_editor() {
   emulate -L zsh
   local sf k v
@@ -148,7 +167,6 @@ _hxp_root_for() {
   esac
 }
 
-# Included sources share the root PDF.
 _hxp_pdf_for() {
   emulate -L zsh
   local root_src; root_src="$(_hxp_root_for "$1" "$2")"
@@ -210,9 +228,16 @@ _hxp_cjk_font() {
     print -r -- "$HXP_CJK_FONT"
     return 0
   fi
+  # Cached per watcher; empty means unavailable.
+  if (( ${+HXP_CJK_FONT_RESOLVED} )); then
+    [[ -n "$HXP_CJK_FONT_RESOLVED" ]] || return 1
+    print -r -- "$HXP_CJK_FONT_RESOLVED"
+    return 0
+  fi
   _hxp_need_cmd fc-list || return 1
 
-  local font
+  local font families
+  families=$'\n'"$(fc-list : family 2>/dev/null)"$'\n'
   for font in \
     'Noto Sans CJK KR' \
     'Noto Serif CJK KR' \
@@ -220,10 +245,21 @@ _hxp_cjk_font() {
     'NanumMyeongjo' \
     'Baekmuk Batang'
   do
-    if fc-list | grep -qF -- "$font"; then
+    # Families include comma-separated aliases.
+    if [[ "$families" == *[$'\n',]"$font"[$'\n',]* ]]; then
       print -r -- "$font"
       return 0
     fi
+  done
+  return 1
+}
+
+# CJK lead bytes: E3-ED (U+3000-U+DFFF).
+_hxp_has_cjk() {
+  emulate -L zsh
+  local LC_ALL=C file
+  for file in "$@"; do
+    [[ -r "$file" && "$(<"$file")" == *[$'\xe3'-$'\xed']* ]] && return 0
   done
   return 1
 }
@@ -237,22 +273,34 @@ _hxp_bib_for() {
   print -r -- "${bibs[1]}"
 }
 
-# Only frontmatter keys override defaults; ignore matches in body text.
-_hxp_md_declares_key() {
+# Set reply to declared frontmatter keys.
+_hxp_md_declared_keys() {
   emulate -L zsh
-  local src="$1" key="$2" awk_bin
-  [[ -f "$src" && -n "$key" ]] || return 1
-  awk_bin="$(_hxp_awk)"
-
-  "$awk_bin" -v key="$key" '
+  local src="$1" awk_bin
+  shift
+  reply=()
+  [[ -f "$src" && $# -gt 0 ]] || return 0
+  _hxp_awk_reply; awk_bin="$REPLY"
+  reply=( ${(f)"$("$awk_bin" -v keys="${(j: :)@}" '
+    BEGIN { n = split(keys, want, " ") }
     NR == 1 && /^---[[:space:]]*$/ { fm = 1; next }
-    fm && /^(---|\.\.\.)[[:space:]]*$/ { exit }
-    fm && $0 ~ "^[[:space:]]*" key "[[:space:]]*:" { found = 1; exit }
-    END { exit !found }
-  ' "$src" 2>/dev/null
+    !fm || /^(---|\.\.\.)[[:space:]]*$/ { exit }
+    {
+      for (i = 1; i <= n; ++i)
+        if (!(want[i] in seen) && $0 ~ "^[[:space:]]*" want[i] "[[:space:]]*:") {
+          seen[want[i]] = 1
+          print want[i]
+        }
+    }
+  ' "$src" 2>/dev/null)"} )
 }
 
-# Source and bibliography extensions for both watch backends.
+_hxp_md_declares_key() {
+  local -a reply
+  _hxp_md_declared_keys "$1" "$2"
+  (( ${#reply} ))
+}
+
 _hxp_watch_exts() {
   case "$1" in
     md)  print -r -- 'md,bib' ;;
@@ -262,17 +310,17 @@ _hxp_watch_exts() {
   esac
 }
 
-# Exclude generated sources to prevent rebuild loops; match watchexec rules.
+# Ignore generated files to prevent rebuild loops.
 _hxp_watch_match() {
   emulate -L zsh
   local ext="$1" path="$2" cbase="${2:t}"
-  [[ "$cbase" == .* ]] && return 1                # our dot-prefixed artifacts
-  [[ "$path" == *.hxp_build_*/* ]] && return 1     # build-dir churn
+  [[ "$cbase" == .* ]] && return 1
+  [[ "$path" == *.hxp_build_*/* ]] && return 1
   local exts=",$(_hxp_watch_exts "$ext"),"
   [[ "$exts" == *",${cbase:e},"* ]]
 }
 
-# Viewers reload natively; SIGHUP can terminate Zathura.
+# Zathura reloads natively; SIGHUP can terminate it.
 _hxp_reload_viewer() {
   :
 }
@@ -307,7 +355,7 @@ _hxp_resolve_error_file() {
 _hxp_runaway_hint() {
   emulate -L zsh
   local err_log="$1" awk_bin
-  awk_bin="$(_hxp_awk)"
+  _hxp_awk_reply; awk_bin="$REPLY"
 
   "$awk_bin" '
     /^Runaway argument\?/ {
@@ -343,9 +391,8 @@ _hxp_line_from_hint() {
 _hxp_error_location() {
   emulate -L zsh
   local err_log="$1" fallback="$2" awk_bin loc file line col hint
-  awk_bin="$(_hxp_awk)"
+  _hxp_awk_reply; awk_bin="$REPLY"
 
-  # Parse LaTeX and Typst locations with POSIX awk.
   loc="$("$awk_bin" -v fallback="$fallback" '
     # LaTeX: file.tex:line:
     /\.tex:[0-9]+:/ {
@@ -394,7 +441,7 @@ _hxp_error_location() {
   printf '%s\t%s\t%s\n' "$file" "$line" "$col"
 }
 
-# Emit file<TAB>line<TAB>col; discard locations in missing files.
+# FILE<TAB>LINE<TAB>COL; ignore missing files.
 _hxp_error_pos_for() {
   emulate -L zsh
   local src="$1" err_log="$2" loc file line col
@@ -422,9 +469,8 @@ _hxp_editor_target_for_error() {
 _hxp_error_extract() {
   emulate -L zsh
   local err_log="$1" awk_bin
-  awk_bin="$(_hxp_awk)"
+  _hxp_awk_reply; awk_bin="$REPLY"
 
-  # Cap each error block and the total extract.
   "$awk_bin" '
     BEGIN { show=0; n=0; total=0; per=40; total_max=400 }
     /^Runaway argument\?/ { show=1; n=0 }
@@ -442,11 +488,11 @@ _hxp_error_extract() {
   ' "$err_log" 2>/dev/null
 }
 
-# Approximate error count; avoid double-counting LaTeX diagnostics.
+# Avoid double-counting LaTeX diagnostics.
 _hxp_error_count() {
   emulate -L zsh
   local err_log="$1" awk_bin
-  awk_bin="$(_hxp_awk)"
+  _hxp_awk_reply; awk_bin="$REPLY"
 
   "$awk_bin" '
     /^error:/        { typst++; next }
@@ -466,7 +512,7 @@ _hxp_error_count() {
 _hxp_primary_error() {
   emulate -L zsh
   local err_log="$1" awk_bin
-  awk_bin="$(_hxp_awk)"
+  _hxp_awk_reply; awk_bin="$REPLY"
 
   "$awk_bin" '
     /Runaway argument\?/ { print; exit }
@@ -508,7 +554,6 @@ _hxp_source_context() {
   '
 }
 
-# Hard-wrap lines by characters, as TeX wraps its own log.
 _hxp_fold() {
   emulate -L zsh
   local width="$1" line
@@ -521,8 +566,10 @@ _hxp_fold() {
   done
 }
 
+# Write Markdown and optional plain-text Typst sections; preserve backslashes.
 _hxp_write_error_md() {
-  local src="$1" ext="$2" err_log="$3" err_md="$4" debug_tex="$5"
+  emulate -L zsh
+  local src="$1" ext="$2" err_log="$3" err_md="$4" debug_tex="$5" parts="${6:-}"
   local loc loc_file line col location extract primary source_line editor_cmd count count_label
   loc="$(_hxp_error_location "$err_log" "$src")"
   IFS=$'\t' read -r loc_file line col <<< "$loc"
@@ -535,10 +582,25 @@ _hxp_write_error_md() {
   editor_cmd="$(_hxp_editor_target_for_error "$(_hxp_session_editor "$src")" "$src" "$err_log")"
   count="$(_hxp_error_count "$err_log")"
   if [[ "$count" -gt 1 ]]; then
-    # ASCII hyphen keeps the header compatible with pdflatex.
     count_label="Compile failed - $count errors"
   else
     count_label="Compile failed"
+  fi
+
+  local suspect="" nearby="" compiler latex_ctx="" mdline="" md_ctx=""
+  [[ -n "$source_line" ]] && suspect="$line | $source_line"
+  if [[ ( "$ext" == tex || "$ext" == typ ) && -n "$line" ]]; then
+    nearby="$(_hxp_source_context "$loc_file" "$line")"
+  fi
+  compiler="$(if [[ -n "$extract" ]]; then print -r -- "$extract"; else tail -n 80 "$err_log"; fi | _hxp_fold 79)"
+  if [[ "$ext" == md && -n "$line" && -f "$debug_tex" ]]; then
+    local start=$(( line > 5 ? line - 5 : 1 ))
+    latex_ctx="$(nl -ba "$debug_tex" | sed -n "${start},$(( line + 5 ))p")"
+    mdline="$(_hxp_guess_md_line_from_tex "$src" "$debug_tex" "$line")"
+    if [[ -n "$mdline" ]]; then
+      start=$(( mdline > 5 ? mdline - 5 : 1 ))
+      md_ctx="$(nl -ba "$src" | sed -n "${start},$(( mdline + 5 ))p")"
+    fi
   fi
 
   {
@@ -552,88 +614,50 @@ _hxp_write_error_md() {
     print
     print -r -- '\begingroup'
     print -r -- '\setlength{\fboxsep}{8pt}'
-    printf '\\colorbox{red!12}{\\parbox{\\dimexpr\\linewidth-2\\fboxsep}{\\Large\\bfseries %s}}\n' "$count_label"
+    print -r -- "\\colorbox{red!12}{\\parbox{\\dimexpr\\linewidth-2\\fboxsep}{\\Large\\bfseries $count_label}}"
     print -r -- '\endgroup'
     print
     print -r -- '# Look Here First'
     print
-    if [[ -n "$primary" ]]; then
-      echo "**Compiler says:** $primary"
-      echo
-    fi
+    [[ -n "$primary" ]] && print -rl -- "**Compiler says:** $primary" ''
     if [[ -n "$line" ]]; then
-      echo "**Location:** [\`$location\`](file://$loc_file#$line)"
+      print -r -- "**Location:** [\`$location\`](file://$loc_file#$line)"
     else
-      echo "**File:** [\`$loc_file\`](file://$loc_file)"
+      print -r -- "**File:** [\`$loc_file\`](file://$loc_file)"
     fi
-    echo
-    echo "**Editor target:** \`$editor_cmd\`"
-    echo
-
-    if [[ -n "$source_line" ]]; then
-      echo "## Suspect Line"
-      echo '```'
-      printf '%s | %s\n' "$line" "$source_line"
-      echo '```'
-      echo
-    fi
-
-    if [[ "$ext" == "tex" || "$ext" == "typ" ]]; then
-      if [[ -n "$line" ]]; then
-        echo "## Nearby Source"
-        echo '```'
-        _hxp_source_context "$loc_file" "$line"
-        echo '```'
-        echo
-      fi
-    fi
-
-    echo "## Compiler Extract"
-    echo '```'
-    # TeX logs are unwrapped for parsing; wrap them to fit the page.
-    if [[ -n "$extract" ]]; then
-      print -r -- "$extract"
-    else
-      tail -n 80 "$err_log"
-    fi | _hxp_fold 79
-    echo '```'
-
-    if [[ "$ext" == "md" ]]; then
-      echo
-      echo "## Where this really is"
-      echo "Pandoc PDF errors typically reference the generated LaTeX, not Markdown."
-      if [[ -n "$line" ]]; then
-        echo "- **LaTeX line:** [\`$debug_tex:$line\`](file://$debug_tex#$line)"
-      fi
-
-      if [[ -n "$line" && -f "$debug_tex" ]]; then
-        local start end
-        start=$(( line - 5 )); (( start < 1 )) && start=1
-        end=$(( line + 5 ))
-        echo
-        echo "### LaTeX context (accurate)"
-        echo '```'
-        nl -ba "$debug_tex" | sed -n "${start},${end}p"
-        echo '```'
-
-        local mdline; mdline="$(_hxp_guess_md_line_from_tex "$src" "$debug_tex" "$line")"
-        if [[ -n "$mdline" ]]; then
-          local mstart mend
-          mstart=$(( mdline - 5 )); (( mstart < 1 )) && mstart=1
-          mend=$(( mdline + 5 ))
-          echo
-          echo "### Probable Markdown location (heuristic)"
-          echo "Best guess: around [\`$src:$mdline\`](file://$src#$mdline)"
-          echo '```'
-          nl -ba "$src" | sed -n "${mstart},${mend}p"
-          echo '```'
-        fi
+    print
+    print -r -- "**Editor target:** \`$editor_cmd\`"
+    print
+    [[ -n "$suspect" ]] && print -rl -- '## Suspect Line' '```' "$suspect" '```' ''
+    [[ -n "$nearby" ]] && print -rl -- '## Nearby Source' '```' "$nearby" '```' ''
+    print -rl -- '## Compiler Extract' '```' "$compiler" '```'
+    if [[ "$ext" == md ]]; then
+      print -rl -- '' '## Where this really is' \
+        'Pandoc PDF errors typically reference the generated LaTeX, not Markdown.'
+      [[ -n "$line" ]] && print -r -- "- **LaTeX line:** [\`$debug_tex:$line\`](file://$debug_tex#$line)"
+      [[ -n "$latex_ctx" ]] && print -rl -- '' '### LaTeX context (accurate)' '```' "$latex_ctx" '```'
+      if [[ -n "$md_ctx" ]]; then
+        print -rl -- '' '### Probable Markdown location (heuristic)' \
+          "Best guess: around [\`$src:$mdline\`](file://$src#$mdline)" '```' "$md_ctx" '```'
       fi
     fi
   } >| "$err_md"
+
+  [[ -n "$parts" && -d "$parts" ]] || return 0
+  local name value file_only=""
+  [[ -z "$line" ]] && file_only="$loc_file"
+  for name value in \
+      heading "$count_label" primary "$primary" location "${line:+$location}" \
+      file "$file_only" link "file://$loc_file${line:+#$line}" \
+      editor "$editor_cmd" suspect "$suspect" nearby "$nearby" compiler "$compiler" \
+      latex-line "${line:+$debug_tex:$line}" latex-link "file://$debug_tex${line:+#$line}" \
+      latex-context "$latex_ctx" md-guess "${mdline:+$src:$mdline}" md-context "$md_ctx"; do
+    [[ -n "$value" ]] && print -r -- "$value" >| "$parts/$name.txt"
+  done
+  [[ "$ext" == md ]] && : >| "$parts/markdown.flag"
+  return 0
 }
 
-# Render raw logs with Typst; no LaTeX dependency or markup escaping.
 _hxp_make_typst_error_pdf() {
   emulate -L zsh
   local err_log="$1" temp_pdf="$2"
@@ -647,65 +671,165 @@ _hxp_make_typst_error_pdf() {
   heading="Compile failed"
   [[ "$count" -gt 1 ]] && heading="Compile failed - $count errors"
 
+  local -a reply fonts
+  local REPLY=""
+  _hxp_typst_font_args; fonts=( "${reply[@]}" )
   {
     print -r -- '#set page(margin: 0.75in)'
-    print -r -- '#set text(size: 10pt)'
+    _hxp_typst_font_rules "$REPLY"
     print -r -- "#block(width: 100%, inset: 10pt, radius: 4pt, fill: rgb(\"#fdecea\"), stroke: rgb(\"#dd3333\"))[#text(size: 15pt, weight: \"bold\", fill: rgb(\"#bb0000\"))[${heading}]]"
     print -r -- '#v(8pt)'
     printf '#raw(read("%s"), block: true)\n' "$base"
   } >| "$err_typ"
 
-  typst compile --root "$root" "$err_typ" "$temp_pdf" >/dev/null 2>&1
+  typst compile --root "$root" "${fonts[@]}" "$err_typ" "$temp_pdf" >/dev/null 2>&1
   local rc=$?
   rm -f -- "$err_typ"
   return $rc
 }
 
-# Record each published error page by file identity, outside the project.
+# Set reply to font arguments and REPLY to the CJK family.
+# Use bundled fonts plus a runtime CJK link.
+_hxp_typst_font_args() {
+  emulate -L zsh
+  reply=( --ignore-system-fonts )
+  REPLY=""
+  local family file dir
+  family="$(_hxp_cjk_font)" || return 0
+  dir="${XDG_RUNTIME_DIR:-/tmp}/hxp/fonts/${family//[^A-Za-z0-9]/_}"
+  if [[ ! -d "$dir" ]]; then
+    zf_mkdir -p -m 700 -- "$dir" 2>/dev/null || return 0
+    file="$(fc-match -f '%{file}' "$family" 2>/dev/null)"
+    # Reject fc-match substitutions.
+    if [[ -r "$file" && "$(fc-match -f '%{family}' "$family" 2>/dev/null)" == *"$family"* ]]; then
+      ln -sf -- "$file" "$dir/font.${file:e:l}" 2>/dev/null
+    fi
+  fi
+  [[ -O "$dir" ]] || return 0
+  local -a found=( "$dir"/font.*(N-.) )
+  (( ${#found} )) || return 0
+  reply+=( --font-path "$dir" )
+  REPLY="$family"
+}
+
+_hxp_typst_font_rules() {
+  emulate -L zsh
+  local family="${1//\\/\\\\}"
+  family="${family//\"/\\\"}"
+  if [[ -n "$family" ]]; then
+    print -r -- "#set text(size: 10pt, font: (\"Libertinus Serif\", \"$family\"))"
+    print -r -- "#show raw: set text(font: (\"DejaVu Sans Mono\", \"$family\"))"
+  else
+    print -r -- '#set text(size: 10pt)'
+  fi
+}
+
+# Read report sections as text to avoid markup escaping.
+_hxp_make_typst_report_pdf() {
+  emulate -L zsh
+  local parts="$1" temp_pdf="$2"
+  _hxp_need_cmd typst && [[ -r "$parts/heading.txt" ]] || return 1
+  local -a reply fonts
+  local REPLY=""
+  _hxp_typst_font_args; fonts=( "${reply[@]}" )
+  {
+    print -r -- '#let part(name) = read(name + ".txt").trim(at: end)'
+    print -r -- '#set page(margin: 0.75in)'
+    _hxp_typst_font_rules "$REPLY"
+    print -r -- '#show raw.where(block: true): set text(size: 8.5pt)'
+    print -r -- '#show link: set text(fill: blue)'
+    print -r -- '#block(width: 100%, inset: 8pt, radius: 3pt, fill: rgb("#fdecea"), stroke: rgb("#dd3333"), text(size: 15pt, weight: "bold", fill: rgb("#bb0000"), part("heading")))'
+    print -r -- '= Look Here First'
+    [[ -s "$parts/primary.txt" ]] && print -r -- '*Compiler says:* #part("primary")' $'\n'
+    if [[ -s "$parts/location.txt" ]]; then
+      print -r -- '*Location:* #link(part("link"), raw(part("location")))' $'\n'
+    else
+      print -r -- '*File:* #link(part("link"), raw(part("file")))' $'\n'
+    fi
+    [[ -s "$parts/editor.txt" ]] && print -r -- '*Editor target:* #raw(part("editor"))'
+    [[ -s "$parts/suspect.txt" ]] && print -r -- '== Suspect Line' $'\n' '#raw(part("suspect"), block: true)'
+    [[ -s "$parts/nearby.txt" ]] && print -r -- '== Nearby Source' $'\n' '#raw(part("nearby"), block: true)'
+    [[ -s "$parts/compiler.txt" ]] && print -r -- '== Compiler Extract' $'\n' '#raw(part("compiler"), block: true)'
+    if [[ -e "$parts/markdown.flag" ]]; then
+      print -r -- '== Where this really is' $'\n' 'Pandoc PDF errors typically reference the generated LaTeX, not Markdown.'
+      [[ -s "$parts/latex-line.txt" ]] && print -r -- '- *LaTeX line:* #link(part("latex-link"), raw(part("latex-line")))'
+      [[ -s "$parts/latex-context.txt" ]] && print -r -- '=== LaTeX context (accurate)' $'\n' '#raw(part("latex-context"), block: true)'
+      if [[ -s "$parts/md-context.txt" ]]; then
+        print -r -- '=== Probable Markdown location (heuristic)' $'\n' 'Best guess: around #raw(part("md-guess"))'
+        print -r -- '#raw(part("md-context"), block: true)'
+      fi
+    fi
+  } >| "$parts/report.typ"
+  typst compile --root "$parts" "${fonts[@]}" "$parts/report.typ" "$temp_pdf" >/dev/null 2>&1
+}
+
+# Set REPLY to the cached or computed error-PDF marker.
 _hxp_error_pdf_marker() {
   emulate -L zsh
+  if [[ -n "${HXP_ERRPDF_MARKER:-}" && "$1" == "${HXP_ERRPDF_PDF:-}" ]]; then
+    REPLY="$HXP_ERRPDF_MARKER"
+    return 0
+  fi
   local state; state="$(_hxp_state_file "$1")"
-  print -r -- "${state:r}.errpdf"
+  REPLY="${state:r}.errpdf"
 }
 
 _hxp_pdf_identity() { stat -c '%d:%i:%s:%y' -- "$1" 2>/dev/null }
 
 _hxp_publish_error_pdf() {
   emulate -L zsh
-  local temp_pdf="$1" pdf="$2" marker
-  mv -f -- "$temp_pdf" "$pdf" || return 1
-  marker="$(_hxp_error_pdf_marker "$pdf")"
-  mkdir -p -- "${marker:h}" 2>/dev/null
+  local temp_pdf="$1" pdf="$2" marker REPLY
+  _hxp_mv "$temp_pdf" "$pdf" || return 1
+  _hxp_error_pdf_marker "$pdf"; marker="$REPLY"
+  zf_mkdir -p -- "${marker:h}" 2>/dev/null
   _hxp_pdf_identity "$pdf" >| "$marker" 2>/dev/null
   return 0
 }
 
-# A rebuilt PDF has a new identity, so a stale marker never matches it.
 _hxp_is_error_pdf() {
   emulate -L zsh
-  local marker id
-  marker="$(_hxp_error_pdf_marker "$1")"
+  local marker id REPLY
+  _hxp_error_pdf_marker "$1"; marker="$REPLY"
   id="$(_hxp_pdf_identity "$1")"
   [[ -n "$id" && -r "$marker" && "$(<"$marker")" == "$id" ]]
 }
 
-_hxp_forget_error_pdf() { rm -f -- "$(_hxp_error_pdf_marker "$1")" 2>/dev/null; return 0 }
+_hxp_forget_error_pdf() {
+  local REPLY
+  _hxp_error_pdf_marker "$1"
+  zf_rm -f -- "$REPLY" 2>/dev/null
+  return 0
+}
 
 _hxp_make_error_pdf() {
+  emulate -L zsh
   local src="$1" ext="$2" err_log="$3" err_md="$4" temp_pdf="$5" debug_tex="$6"
-  local pdf="$7"
+  local pdf="$7" parts="" render=1
   local -a pdf_engine
 
-  _hxp_write_error_md "$src" "$ext" "$err_log" "$err_md" "$debug_tex"
-
-  # Keep a good PDF, but refresh an error page so it shows the latest failure.
+  # Preserve good PDFs; refresh existing error pages.
   if [[ "${HXP_KEEP_LAST_GOOD:-}" == 1 && -s "$pdf" ]] && ! _hxp_is_error_pdf "$pdf"; then
-    return 1
+    render=0
   fi
-
-  if [[ "$ext" == "typ" ]] && _hxp_make_typst_error_pdf "$err_log" "$temp_pdf"; then
-    return 0
+  # Keep report files outside the watched tree.
+  if (( render )) && [[ "$ext" != typ ]] && _hxp_need_cmd typst; then
+    local report_root="${XDG_RUNTIME_DIR:-/tmp}/hxp"
+    if zf_mkdir -p -- "$report_root" 2>/dev/null; then
+      parts="$(mktemp -d "$report_root/errdoc.XXXXXXXX")" || parts=""
+    fi
   fi
+  {
+    _hxp_write_error_md "$src" "$ext" "$err_log" "$err_md" "$debug_tex" "$parts"
+    (( render )) || return 1
+    if [[ "$ext" == "typ" ]] && _hxp_make_typst_error_pdf "$err_log" "$temp_pdf"; then
+      return 0
+    fi
+    if [[ -n "$parts" ]] && _hxp_make_typst_report_pdf "$parts" "$temp_pdf"; then
+      return 0
+    fi
+  } always {
+    [[ -n "$parts" ]] && zf_rm -rf -- "$parts" 2>/dev/null
+  }
 
   _hxp_need_cmd xelatex && pdf_engine=( --pdf-engine=xelatex )
 
@@ -730,7 +854,6 @@ _hxp_guess_md_line_from_tex() {
   hxp-mdline "$1" "$2" "$3"
 }
 
-# Remove scratch files, preserving the output PDF.
 _hxp_sweep_artifacts() {
   emulate -L zsh
   local temp_pdf="$1" err_log="$2" err_md="$3" debug_tex="$4" synctex_gz="$5" build_dir="$6"
@@ -739,7 +862,6 @@ _hxp_sweep_artifacts() {
   return 0
 }
 
-# Publish a completed watch snapshot or render its errors.
 _hxp_typst_render_state() {
   emulate -L zsh
   local state="$1" buf="$2" src="$3" ext="$4" err_log="$5" err_md="$6" temp_pdf="$7" debug_tex="$8" pdf="$9"
@@ -748,47 +870,46 @@ _hxp_typst_render_state() {
   if [[ "$state" == "ok" ]]; then
     if [[ -n "$watch_pdf" ]]; then
       [[ -s "$watch_pdf" ]] || return 1
-      cp -f -- "$watch_pdf" "$temp_pdf" && mv -f -- "$temp_pdf" "$pdf" || return 1
+      cp -f -- "$watch_pdf" "$temp_pdf" && _hxp_mv "$temp_pdf" "$pdf" || return 1
     fi
     _hxp_forget_error_pdf "$pdf"
-    rm -f -- "$err_md"
+    zf_rm -f -- "$err_md"
     return 0
   fi
   print -rn -- "$buf" >> "$err_log"
   if _hxp_make_error_pdf "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf"; then
     [[ -s "$temp_pdf" ]] && _hxp_publish_error_pdf "$temp_pdf" "$pdf"
   fi
-  rm -f -- "$temp_pdf"
+  zf_rm -f -- "$temp_pdf"
   return 0
 }
 
-# Publish success immediately; debounce error diagnostics with zselect.
+# Publish successes immediately; flush errors after 100ms of silence.
 _hxp_typst_watch_render() {
   emulate -L zsh
   local src="$1" ext="$2" err_log="$3" err_md="$4" temp_pdf="$5" debug_tex="$6" pdf="$7"
   local watch_pdf="${8:-}"
 
   if ! zmodload zsh/zselect 2>/dev/null; then
-    # Without zselect, preserve diagnostics only.
     cat >> "$err_log"
     return 0
   fi
 
   local line buf="" state="" to
   while true; do
-    [[ -n "$state" ]] && to=60 || to=6000
+    [[ -n "$state" ]] && to=10 || to=6000
     if zselect -t "$to" -r 0; then
-      IFS= read -r line || break              # fd readable but empty -> EOF
+      IFS= read -r line || break
       case "$line" in
-        *"] compiling "*)            buf=""; state="" ;;   # new cycle: reset
+        *"] compiling "*)            buf=""; state="" ;;
         *"compiled with errors"*)    state="fail" ;;
         *"compiled successfully"*|*"compiled with warning"*)
           _hxp_typst_render_state ok "$buf" \
             "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf" "$watch_pdf"
           state=""; buf=""
           ;;
-        watching\ *|"writing to "*|"") ;;                  # watch chatter
-        *)                           buf+="$line"$'\n' ;;  # diagnostic
+        watching\ *|"writing to "*|"") ;;
+        *)                           buf+="$line"$'\n' ;;
       esac
     else
       [[ -n "$state" ]] && _hxp_typst_render_state "$state" "$buf" \
@@ -804,15 +925,16 @@ _hxp_typst_watch_render() {
 _hxp_compile_once() {
   emulate -L zsh
   setopt pipefail clobber
-  local -x PATH="/usr/bin:$PATH"  # Conda's Pandoc 2.12 ignores the enabled math syntax.
+  local -x PATH="/usr/bin:$PATH"  # Prefer system Pandoc for math support.
   local src="$1" ext="$2" dir="$3" stem="$4"
   local pdf="$5" temp_pdf="$6" err_log="$7" err_md="$8" debug_tex="$9" build_dir="${10}"
 
-  rm -f -- "$temp_pdf"
+  zf_rm -f -- "$temp_pdf"
   : >| "$err_log"
 
   local ok=1
   local base="${src:t}"
+  local -a reply
 
   local root_src; root_src="$(_hxp_root_for "$src" "$ext")"
   local root_dir="${root_src:h}"
@@ -825,32 +947,45 @@ _hxp_compile_once() {
       local -a pdf_vars
       pdf_vars=( -V colorlinks=true -V linkcolor=blue -V urlcolor=blue )
 
+      local -a declared
+      _hxp_md_declared_keys "$src" bibliography CJKmainfont geometry
+      declared=( "${reply[@]}" )
+
       local -a cite_args
-      if _hxp_md_declares_key "$src" bibliography; then
+      if (( ${declared[(Ie)bibliography]} )); then
         cite_args=( --citeproc )
       elif [[ -n "$bib" ]]; then
         cite_args=( --citeproc --bibliography="$bib" )
       fi
 
-      if ! _hxp_md_declares_key "$src" CJKmainfont; then
-        local cjk_font; cjk_font="$(_hxp_cjk_font)"
-        [[ -n "$cjk_font" ]] && pdf_vars+=( -V "CJKmainfont=$cjk_font" )
+      # Load xeCJK only when needed.
+      local -a cjk_args
+      if (( ! ${declared[(Ie)CJKmainfont]} )); then
+        if [[ -n "$HXP_CJK_FONT" ]] || _hxp_has_cjk "$src" "$dir"/*.bib(N); then
+          local cjk_font; cjk_font="$(_hxp_cjk_font)"
+          [[ -n "$cjk_font" ]] && pdf_vars+=( -V "CJKmainfont=$cjk_font" )
+        elif (( ${declared[(Ie)bibliography]} )); then
+          # Let Pandoc parse bibliography metadata.
+          local -x HXP_CJK_FONT_RESOLVED="$(_hxp_cjk_font)"
+          [[ -n "$HXP_CJK_FONT_RESOLVED" ]] && cjk_args=(
+            --lua-filter "${${(%):-%x}:A:h:h}/filters/cjk-bibliography.lua"
+          )
+        fi
       fi
 
-      # Normalize bare margins; empty HXP_MD_MARGIN keeps class defaults.
       local md_margin="${HXP_MD_MARGIN-0.75in}"
-      if [[ -n "$md_margin" ]] && ! _hxp_md_declares_key "$src" geometry; then
+      if [[ -n "$md_margin" ]] && (( ! ${declared[(Ie)geometry]} )); then
         [[ "$md_margin" == *=* ]] || md_margin="margin=$md_margin"
         pdf_vars+=( -V "geometry=$md_margin" )
       fi
 
       if _hxp_need_cmd latexmk; then
-        # SyncTeX needs the .hxp.tex intermediate; xelatex forbids dotfile outputs.
-        mkdir -p -- "$build_dir"
+        # Retain TeX for SyncTeX; xelatex rejects dotfile outputs.
+        zf_mkdir -p -- "$build_dir"
         local synctex_tex="$build_dir/${stem}.hxp.tex"
         if (
           cd -- "$dir" &&
-          pandoc -f markdown+tex_math_single_backslash "${pdf_vars[@]}" "${cite_args[@]}" \
+          pandoc -f markdown+tex_math_single_backslash "${pdf_vars[@]}" "${cjk_args[@]}" "${cite_args[@]}" \
             -s -t latex "$base" -o "$synctex_tex" \
             >"$err_log" 2>&1
         ); then
@@ -864,7 +999,7 @@ _hxp_compile_once() {
             latexmk_engine=( -pdf )
           fi
 
-          # The intermediate's absolute path must not wrap in the log.
+          # Keep paths unwrapped for error parsing.
           if (
             cd -- "$dir" &&
             max_print_line=10000 latexmk "${latexmk_engine[@]}" -synctex=1 \
@@ -874,11 +1009,11 @@ _hxp_compile_once() {
           ); then
             local build_stem="${${synctex_tex:t}:r}"
             if [[ -f "$build_dir/$build_stem.pdf" ]]; then
-              mv -f -- "$build_dir/$build_stem.pdf" "$temp_pdf"
+              _hxp_mv "$build_dir/$build_stem.pdf" "$temp_pdf"
+              # Rename sidecars so searches never read partial writes.
               if [[ -f "$build_dir/$build_stem.synctex.gz" ]]; then
                 local pdf_base="${${pdf:t}:r}"
-                cp -f -- "$build_dir/$build_stem.synctex.gz" \
-                  "${pdf:h}/$pdf_base.synctex.gz" 2>/dev/null
+                _hxp_mv "$build_dir/$build_stem.synctex.gz" "${pdf:h}/$pdf_base.synctex.gz" 2>/dev/null
               fi
               ok=0
             fi
@@ -887,7 +1022,7 @@ _hxp_compile_once() {
           debug_tex="$synctex_tex"
         fi
       else
-        # Direct Pandoc fallback has no working SyncTeX.
+        # Direct Pandoc cannot retain SyncTeX.
         local -a pdf_engine
         if _hxp_need_cmd xelatex; then
           pdf_engine=( --pdf-engine=xelatex )
@@ -897,7 +1032,7 @@ _hxp_compile_once() {
 
         if (
           cd -- "$dir" &&
-          pandoc -f markdown+tex_math_single_backslash "${pdf_engine[@]}" "${pdf_vars[@]}" "${cite_args[@]}" "$base" -o "$temp_pdf" \
+          pandoc -f markdown+tex_math_single_backslash "${pdf_engine[@]}" "${pdf_vars[@]}" "${cjk_args[@]}" "${cite_args[@]}" "$base" -o "$temp_pdf" \
             --pdf-engine-opt=-synctex=1 \
             --pdf-engine-opt=-interaction=nonstopmode \
             --pdf-engine-opt=-halt-on-error \
@@ -921,10 +1056,9 @@ _hxp_compile_once() {
       ;;
 
     tex)
-      mkdir -p -- "$build_dir"
+      zf_mkdir -p -- "$build_dir"
       local -a bib_args
       [[ -n "$bib" ]] && bib_args=( -bibtex )
-      # Long paths must not wrap in the log.
       if (
         cd -- "$root_dir" &&
         max_print_line=10000 latexmk -pdf -synctex=1 -interaction=nonstopmode -halt-on-error \
@@ -934,10 +1068,10 @@ _hxp_compile_once() {
           "$root_src" >"$err_log" 2>&1
       ); then
         if [[ -f "$build_dir/$root_stem.pdf" ]]; then
-          mv -f -- "$build_dir/$root_stem.pdf" "$temp_pdf"
+          _hxp_mv "$build_dir/$root_stem.pdf" "$temp_pdf"
           if [[ -f "$build_dir/$root_stem.synctex.gz" ]]; then
-            # Sidecars belong beside the root PDF, even for included sources.
-            cp -f -- "$build_dir/$root_stem.synctex.gz" "${pdf:h}/$root_stem.synctex.gz" 2>/dev/null
+            # Publish root sidecars atomically.
+            _hxp_mv "$build_dir/$root_stem.synctex.gz" "${pdf:h}/$root_stem.synctex.gz" 2>/dev/null
           fi
           ok=0
         fi
@@ -951,11 +1085,10 @@ _hxp_compile_once() {
   esac
 
   if [[ $ok -eq 0 && -s "$temp_pdf" ]]; then
-    mv -f -- "$temp_pdf" "$pdf"
+    _hxp_mv "$temp_pdf" "$pdf"
     _hxp_forget_error_pdf "$pdf"
-    rm -f -- "$err_md"
-    # Retain Markdown intermediates for inverse search.
-    [[ "$ext" != "md" ]] && rm -f -- "$debug_tex"
+    zf_rm -f -- "$err_md"
+    [[ "$ext" != "md" ]] && zf_rm -f -- "$debug_tex"
     _hxp_reload_viewer
     return 0
   fi
@@ -966,7 +1099,7 @@ _hxp_compile_once() {
       _hxp_reload_viewer
     fi
   fi
-  rm -f -- "$temp_pdf"
+  zf_rm -f -- "$temp_pdf"
   return 1
 }
 
@@ -995,7 +1128,7 @@ _hxp_render_errs() {
   loc="$(_hxp_error_location "$err_log" "$src")"
   IFS=$'\t' read -r file line col <<< "$loc"
 
-  # Pandoc may reference a deleted temporary .tex file.
+  # Pandoc may report deleted TeX files.
   if [[ -n "$line" && -f "$file" ]]; then
     printf '  %sat%s %s:%s%s\n' "$C_DIM" "$C_RST" "$file" "$line" "${col:+:$col}"
     local source_line; source_line="$(_hxp_source_line "$file" "$line")"
@@ -1025,7 +1158,7 @@ hxp_errs() {
 
   _hxp_render_errs "$err_log" "$err_md" "$src"
 
-  # Watch deletions: removing err_md signals error recovery.
+  # Deleting err_md signals recovery.
   local changed _drain
   inotifywait -m -q -e close_write -e moved_to -e create -e delete \
       --format '%w%f' "$dir" 2>/dev/null \
@@ -1034,7 +1167,6 @@ hxp_errs() {
           "$err_log"|"$err_md"|"$pdf") ;;
           *) continue ;;
         esac
-        # Drain related events before rendering the final state.
         while IFS= read -r -t 0.2 _drain 2>/dev/null; do :; done
         _hxp_render_errs "$err_log" "$err_md" "$src"
       done
@@ -1107,6 +1239,21 @@ _hxp_doctor() {
   print -r -- "${C_H}Inverse search (PDF -> editor)${C_R}"
   if _hxp_need_cmd hxp-jump; then _hxp_doctor_row hxp-jump ok "$(command -v hxp-jump)"
   else _hxp_doctor_row hxp-jump miss "not on PATH — viewers can't reverse-search"; fi
+  if [[ "$viewer" == fancy-cat ]]; then
+    if ! _hxp_fancy_cat_has_resolver; then
+      _hxp_doctor_row fancy-cat opt "build lacks --inverse-search-resolver — update the fork for PDF Ctrl+L and Typst lookup"
+    elif _hxp_need_cmd hxp-inverse && _hxp_need_cmd python3; then
+      _hxp_doctor_row hxp-inverse ok "Ctrl+L: SyncTeX or Typst prose lookup"
+    else
+      _hxp_doctor_row hxp-inverse miss "needs python3 and hxp-inverse — rerun install.sh"
+    fi
+    if [[ -n "$TMUX" ]] && _hxp_need_cmd tmux; then
+      local mouse_binding; mouse_binding="$(tmux list-keys -T root C-MouseDown1Pane 2>/dev/null)"
+      if [[ "$mouse_binding" != *'send-keys -M'* ]]; then
+        _hxp_doctor_row Ctrl+click opt "tmux intercepts it — use Ctrl+L or add the manual's mouse binding"
+      fi
+    fi
+  fi
   if _hxp_need_cmd hxp-mdline; then _hxp_doctor_row hxp-mdline ok "md <- tex line mapping"
   else _hxp_doctor_row hxp-mdline opt "absent — md location/inverse-search degraded"; fi
   if _hxp_need_cmd tmux; then _hxp_doctor_row tmux ok "in-place jumps when hxp runs in tmux"

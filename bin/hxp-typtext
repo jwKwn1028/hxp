@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Usage: hxp-typtext <typ-file> <line> [--context]
-# Print searchable prose candidates, longest first.
+# Print prose candidates, longest first.
 
 set -u
 
@@ -12,7 +12,7 @@ typ_line="${2:-}"
 typ_total="$(awk 'END { print NR }' "$typ" 2>/dev/null)"
 [[ -z "$typ_total" || "$typ_total" -eq 0 ]] && exit 0
 
-# Split at markup and math; joining across them invents page text.
+# Do not join prose across markup or math.
 runs_for() {
   sed -n "${1}p" "$typ" 2>/dev/null \
     | sed -E '
@@ -60,7 +60,6 @@ emit_candidates() {
       printf '%s\n' "${words[*]:0:i}"
     done
 
-    # Short common words match too many pages.
     printf '%s\n' "${words[@]}" \
       | sed -E 's/[^[:alnum:]_.-]//g' \
       | awk 'length($0) >= 8 { print $0 }'

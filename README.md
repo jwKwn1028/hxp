@@ -1,7 +1,7 @@
 # hxp
 
-Edit **Markdown, LaTeX, and Typst** in Helix or Micro. On save, fancy-cat updates
-the preview in a right-hand Ghostty or tmux split. Fallbacks are Zathura, then Sioyek.
+Edit **Markdown, LaTeX, or Typst** in Helix or Micro with a PDF preview.
+Saves update fancy-cat in a Ghostty or tmux split; Zathura and Sioyek are fallbacks.
 
 [Manual](manual.md) · [PDF manual](manual.pdf)
 
@@ -12,28 +12,26 @@ git clone https://github.com/jwKwn1028/hxp.git ~/Applications/hxp
 ~/Applications/hxp/install.sh
 ```
 
-Rerun `install.sh` after updating hxp to pick up new helper symlinks;
-`--no-config` leaves the Zathura and Sioyek configs to your dotfiles. In the
-chezmoi setup, `chezmoi apply` clones hxp at a pinned commit, runs
-`install.sh --no-config`, and installs the Helix and Micro F8 bindings.
-
-Add to `~/.zshrc`, ensure `~/.local/bin` is on `PATH`, and reload:
+Add to `~/.zshrc`, put `~/.local/bin` on `PATH`, and reload:
 
 ```zsh
 [[ -r "$HOME/.zsh/hxp-main.zsh" ]] && source "$HOME/.zsh/hxp-main.zsh"
 ```
 
-Dependencies: `./install.sh --deps`. Check your setup: `hxp --doctor`.
+Rerun the installer after updates. `--no-config` preserves viewer configs;
+chezmoi uses it and supplies Ctrl+L bindings. Dependencies: `./install.sh --deps`.
+Check setup with `hxp --doctor`.
 
 ## Use
 
 ```sh
-hxp notes.md            # Helix + PDF preview
-hxp --micro paper.tex   # use Micro
+hxp notes.md            # Helix + preview
+hxp --micro paper.tex   # Micro + preview
 hxp slides.typ
-wpdf notes.md           # watch only
-hxp_errs paper.tex      # live errors in another pane
+wpdf notes.md           # watcher only
+hxp_errs paper.tex      # live diagnostics
 ```
 
-Ctrl+click typeset text to jump to its source with SyncTeX. For the reverse
-direction, bind an [editor-to-PDF search key](manual.md#forward-search-editor--pdf).
+Ctrl+L follows the cursor into the PDF; in fancy-cat it returns to source.
+Ctrl+click also returns to source. LaTeX/Markdown use SyncTeX; Typst matches prose.
+See [search setup](manual.md#inverse-search-pdf--editor).

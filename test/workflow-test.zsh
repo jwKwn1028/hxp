@@ -1,11 +1,10 @@
 #!/usr/bin/env zsh
-# Session regressions without compilers, editors, viewers, or an X server.
+# Session and build-option regressions.
 emulate -L zsh
 set -u
 
 repo="${0:A:h:h}"
 source "$repo/zsh/hxp-main.zsh"
-# Use this checkout's library.
 source "$repo/zsh/hxp-lib.zsh"
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
@@ -44,8 +43,12 @@ print -r -- '  [watcher output paths]'
   _hxp_compile_once() { print -r -- "$5" >> "$work/compile-targets" }
   _hxp_sweep_artifacts() { print -r -- "$5" > "$work/swept-sidecar" }
   watchexec() {
-    while [[ "$1" != -- ]]; do shift; done
-    shift 2 # -- hxp-compile
+    local direct=0
+    while [[ "$1" != -- ]]; do [[ "$1" == (-n|--shell=none) ]] && direct=1; shift; done
+    shift
+    # Model watchexec shell joining without -n.
+    (( direct )) || set -- ${(z)${(j: :)@}}
+    shift # hxp-compile
     _hxp_compile_once "$@"
   }
   inotifywait() { print -r -- "$test_src" }
@@ -79,6 +82,149 @@ print -r -- '  [watcher output paths]'
   exit "$fail"
 ) || fail=1
 
+print -r -- '  [real watchexec keeps paths whole]'
+if (( $+commands[watchexec] && $+commands[inotifywait] && $+commands[pandoc] )); then
+(
+  wdir="$work/watch [dir] with spaces"
+  mkdir -p "$wdir" "$work/wx-bin"
+  print -r -- '# Doc' > "$wdir/doc.md"
+  print -rl -- '#!/bin/sh' 'printf "%s\n" "$1" >> "$WX_ARGS"' > "$work/wx-bin/hxp-compile"
+  chmod +x "$work/wx-bin/hxp-compile"
+  export PATH="$work/wx-bin:$PATH" WX_ARGS="$work/wx-args" XDG_RUNTIME_DIR="$work/wx-runtime"
+  wpdf -q --no-initial "$wdir/doc.md" >/dev/null 2>&1 &
+  wpid=$!
+  for attempt in {1..100}; do
+    (( attempt % 10 == 1 )) && print -r -- "edit $attempt" >> "$wdir/doc.md"
+    [[ -s "$WX_ARGS" ]] && break
+    sleep 0.05
+  done
+  pkill -TERM -P "$wpid" 2>/dev/null; kill -TERM "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+  check 'real watchexec passes the source path intact' "$wdir/doc.md" "$(head -1 "$WX_ARGS" 2>/dev/null)"
+  exit "$fail"
+) || fail=1
+else
+  print -r -- '    - skipped (needs watchexec, inotifywait and pandoc)'
+fi
+
+print -r -- '  [markdown build options]'
+(
+  mkdir -p "$work/md-options"
+  print -rl -- '---' 'title: English' 'geometry: margin=1in' '---' 'Plain text — café ﬁ.' > "$work/md-options/en.md"
+  print -rl -- '# 제목' '서로 다른 문장.' > "$work/md-options/ko.md"
+  _hxp_md_declared_keys "$work/md-options/en.md" bibliography CJKmainfont geometry
+  check 'one frontmatter pass finds the declared keys' geometry "${reply[*]}"
+  check 'Latin text with accents and ligatures is not CJK' 1 "$(_hxp_has_cjk "$work/md-options/en.md"; print $?)"
+  check 'Hangul is CJK' 0 "$(_hxp_has_cjk "$work/md-options/ko.md"; print $?)"
+  export HXP_CJK_FONT_RESOLVED='Test CJK'
+  _hxp_need_cmd() { [[ "$1" == (latexmk|xelatex) ]] }
+  pandoc() { print -r -- "$*" > "$work/md-options/pandoc-args"; return 1 }
+  _hxp_make_error_pdf() { return 1 }
+  for doc in en ko; do
+    d="$work/md-options"
+    _hxp_compile_once "$d/$doc.md" md "$d" "$doc" "$d/$doc.pdf" "$d/.$doc.tmp.pdf" "$d/.$doc.error.log" \
+      "$d/.$doc.error.md" "$d/.$doc.debug.tex" "$d/.hxp_build_$doc" >/dev/null
+    cjk=no; [[ "$(<"$d/pandoc-args")" == *"CJKmainfont=Test CJK"* ]] && cjk=yes
+    check "$doc build loads xeCJK only for CJK text" "$([[ $doc == ko ]] && print yes || print no)" "$cjk"
+  done
+  geometry=no; [[ "$(<"$work/md-options/pandoc-args")" == *"geometry=margin=0.75in"* ]] && geometry=yes
+  check 'undeclared geometry gets the default margin' yes "$geometry"
+  exit "$fail"
+) || fail=1
+
+print -r -- '  [CJK in configured bibliographies]'
+if (( $+commands[pandoc] )); then
+(
+  # Test bundled filter lookup through the installed symlink.
+  ln -s "$repo/zsh/hxp-lib.zsh" "$work/installed-lib.zsh"
+  source "$work/installed-lib.zsh"
+  d="$work/md-bibliographies"
+  mkdir -p "$d/references with spaces"
+  print -rl -- '@book{english,' '  author = {Smith, Alice},' '  title = {English title},' '  year = {2020}' '}' > "$d/english.bib"
+  print -rl -- '@book{korean,' '  author = {Kim, Jisu},' '  title = {한국어 제목},' '  year = {2021}' '}' > "$d/references with spaces/korean.bib"
+  export HXP_CJK_FONT_RESOLVED='Test CJK'
+  unset HXP_CJK_FONT
+  _hxp_need_cmd() { [[ "$1" == (latexmk|xelatex) ]] }
+  # Generate TeX without invoking LaTeX.
+  pandoc() { command pandoc "$@"; return 1 }
+  _hxp_make_error_pdf() { return 1 }
+  for form in scalar inline-list block-list english override; do
+    {
+      print -r -- '---'
+      case "$form" in
+        scalar) print -r -- 'bibliography: "references with spaces/korean.bib"' ;;
+        inline-list) print -r -- "bibliography: [english.bib, 'references with spaces/korean.bib']" ;;
+        block-list) print -rl -- 'bibliography:' '  - english.bib' "  - \"$d/references with spaces/korean.bib\"" ;;
+        english) print -r -- 'bibliography: english.bib' ;;
+        override) print -rl -- 'bibliography: "references with spaces/korean.bib"' 'CJKmainfont: Explicit CJK' ;;
+      esac
+      print -rl -- '---' 'An English document with a citation [@english; @korean].'
+    } > "$d/$form.md"
+    (cd /; _hxp_compile_once "$d/$form.md" md "$d" "$form" "$d/$form.pdf" "$d/.$form.tmp.pdf" \
+      "$d/.$form.error.log" "$d/.$form.error.md" "$d/.$form.debug.tex" "$d/.hxp_build_$form") >/dev/null
+    tex="$d/.hxp_build_$form/$form.hxp.tex"
+    font=no; grep -qF 'Test CJK' "$tex" && font=yes
+    expected=yes; [[ "$form" == (english|override) ]] && expected=no
+    check "$form bibliography chooses the CJK default only when needed" "$expected" "$font"
+    if [[ "$form" == override ]]; then
+      check 'frontmatter CJK font is preserved' yes "$(grep -qF 'Explicit CJK' "$tex" && print yes || print no)"
+    fi
+  done
+  exit "$fail"
+) || fail=1
+else
+  print -r -- '    - skipped (needs pandoc)'
+fi
+
+print -r -- '  [concurrent error reports]'
+(
+  report_work="$work/concurrent-reports"
+  mkdir -p "$report_work"
+  export XDG_RUNTIME_DIR="$report_work/runtime"
+  unset HXP_KEEP_LAST_GOOD
+  _hxp_need_cmd() { [[ "$1" == typst ]] }
+  pandoc() { return 1 }
+  wait_reports() {
+    local pattern="$1" attempt
+    for attempt in {1..200}; do
+      [[ -e "$report_work/a.$pattern" && -e "$report_work/b.$pattern" ]] && return 0
+      sleep 0.01
+    done
+    return 1
+  }
+  _hxp_make_typst_report_pdf() {
+    local parts="$1" output="$2" name="${2:t:r}"
+    print -r -- "$parts" > "$report_work/$name.parts"
+    stat -c %a -- "$parts" > "$report_work/$name.mode"
+    : > "$report_work/$name.ready"
+    wait_reports ready || return 1
+    cat "$parts/primary.txt" "$parts/link.txt" > "$output" || return 1
+    : > "$report_work/$name.read"
+    # Finish both reads before cleanup.
+    wait_reports read
+  }
+  for name in a b; do
+    print -r -- "Source for $name" > "$report_work/$name.tex"
+    print -r -- "$report_work/$name.tex:1: Error in $name." > "$report_work/$name.log"
+  done
+  _hxp_make_error_pdf "$report_work/a.tex" tex "$report_work/a.log" "$report_work/a.md" "$report_work/a.pdf" '' "$report_work/a.final.pdf" &
+  a_pid=$!
+  _hxp_make_error_pdf "$report_work/b.tex" tex "$report_work/b.log" "$report_work/b.md" "$report_work/b.pdf" '' "$report_work/b.final.pdf" &
+  b_pid=$!
+  wait "$a_pid"; check 'first concurrent report succeeds' 0 "$?"
+  wait "$b_pid"; check 'second concurrent report succeeds' 0 "$?"
+  for name in a b; do
+    check "$name report retains its own error and source link" \
+      "Error in $name."$'\n'"file://$report_work/$name.tex#1" "$(cat "$report_work/$name.pdf" 2>/dev/null)"
+    check "$name report directory is private" 700 "$(cat "$report_work/$name.mode" 2>/dev/null)"
+  done
+  check 'concurrent reports use different directories' yes \
+    "$([[ -s "$report_work/a.parts" && -s "$report_work/b.parts" && \
+          "$(cat "$report_work/a.parts")" != "$(cat "$report_work/b.parts")" ]] && print yes || print no)"
+  leftovers=( "$XDG_RUNTIME_DIR"/hxp/errdoc.*(N) )
+  check 'report directories are cleaned up' 0 "${#leftovers}"
+  exit "$fail"
+) || fail=1
+
 print -r -- '  [preview selection]'
 (
   export TMUX='' TMUX_PANE='' TERM_PROGRAM=ghostty WINDOWID=42 DISPLAY=:1 GHOSTTY_SURFACE_ID=test
@@ -87,11 +233,19 @@ print -r -- '  [preview selection]'
   _hxp_need_cmd() { [[ "$installed" == *" $1 "* ]] }
   fancy-cat() {
     case "$1" in
-      --help) print -r -- '--listen SOCKET' ;;
+      --help) print -r -- '--listen SOCKET --inverse-search-resolver PROGRAM' ;;
       --tmux-supported) (( passthrough )) ;;
     esac
   }
   check 'native split outranks the GUI preference' fancy-cat "$(_hxp_viewer)"
+  fancy-cat() { [[ "$1" == --help ]] && print -r -- '--listen SOCKET' }
+  check 'fork builds without the resolver still split' fancy-cat "$(_hxp_viewer)"
+  fancy-cat() {
+    case "$1" in
+      --help) print -r -- '--listen SOCKET --inverse-search-resolver PROGRAM' ;;
+      --tmux-supported) (( passthrough )) ;;
+    esac
+  }
   check 'HXP_NO_SPLIT=1 keeps the GUI viewer' sioyek "$(HXP_NO_SPLIT=1 _hxp_viewer)"
   check 'split check explains the opt-out' 'disabled by HXP_NO_SPLIT=1' "$(HXP_NO_SPLIT=1 _hxp_split_check)"
   installed=' fancy-cat zathura sioyek '
@@ -111,6 +265,74 @@ print -r -- '  [preview selection]'
   check 'no available viewer reports failure' 1 "$?"
   exit "$fail"
 ) || fail=1
+
+print -r -- '  [preview session pin]'
+(
+  export XDG_RUNTIME_DIR="$work/launch-runtime" HXP_SESSION_SRC="$project/main.typ"
+  mkdir -p "$XDG_RUNTIME_DIR"
+  pdf="$project/main.pdf" preview_dir='' preview_pane='' preview_shell=''
+  help='--listen SOCKET --inverse-search-resolver PROGRAM'
+  fancy-cat() { [[ "$1" == --help ]] && print -r -- "$help" }
+  tmux() { print -r -- "${(j:|:)@}" > "$work/split-args"; return 1 }
+  TMUX=test TMUX_PANE=%1 _hxp_start_split
+  check 'tmux preview receives the session pin and resolver' yes \
+    "$([[ "$(<"$work/split-args")" == *"|-e|HXP_PREVIEW_SRC=$project/main.typ|fancy-cat|--listen|"*"|--inverse-search|hxp-jump|--inverse-search-resolver|hxp-inverse|$pdf" ]] && print yes || print no)"
+  help='--listen SOCKET'
+  TMUX=test TMUX_PANE=%1 _hxp_start_split
+  check 'older fork builds launch without the resolver' yes \
+    "$([[ "$(<"$work/split-args")" == *"|fancy-cat|--listen|"*"|--inverse-search|hxp-jump|$pdf" ]] && print yes || print no)"
+
+  help='--listen SOCKET --inverse-search-resolver PROGRAM'
+  xdotool() { [[ "$1" == getactivewindow ]] && print -r -- "$WINDOWID" || return 1 }
+  TMUX='' WINDOWID=42 GHOSTTY_SURFACE_ID=editor _hxp_start_split
+  check 'Ghostty request records the session source' "$project/main.typ" "$(cat "$preview_dir/src" 2>/dev/null)"
+  check 'Ghostty request records resolver support' yes "$([[ -e "$preview_dir/resolver" ]] && print yes || print no)"
+
+  claim_home="$work/claim-home" claim_bin="$work/claim-bin"
+  mkdir -p "$claim_home/.zsh" "$claim_bin"
+  ln -s "$repo/zsh/hxp-lib.zsh" "$claim_home/.zsh/hxp-lib.zsh"
+  print -rl -- '#!/bin/sh' 'printf "%s\n" "pin=${HXP_PREVIEW_SRC:-}" "$@" > "$CLAIMED"' > "$claim_bin/fancy-cat"
+  chmod +x "$claim_bin/fancy-cat"
+  print -r -- other > "$preview_dir/source-surface"
+  print -r -- "$$" > "$preview_dir/owner"
+  ln -sfT -- "$preview_dir" "$XDG_RUNTIME_DIR/hxp-preview-$UID/window-42"
+  env -i HOME="$claim_home" PATH="$claim_bin:/usr/bin:/bin" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+    CLAIMED="$work/claimed" TERM_PROGRAM=ghostty WINDOWID=42 GHOSTTY_SURFACE_ID=split \
+    zsh -f -i -c "source ${(q)repo}/zsh/hxp-main.zsh" </dev/null >/dev/null 2>&1
+  check 'claimed Ghostty preview exports the pin' "pin=$project/main.typ" "$(head -1 "$work/claimed" 2>/dev/null)"
+  check 'claimed Ghostty preview uses the resolver' yes \
+    "$(grep -qx -- --inverse-search-resolver "$work/claimed" 2>/dev/null && print yes || print no)"
+  exit "$fail"
+) || fail=1
+
+print -r -- '  [hangup watchdog]'
+if (( $+commands[script] && $+commands[python3] )); then
+(
+  wd="$work/watchdog"
+  mkdir -p "$wd"
+  # Model Helix ignoring SIGHUP.
+  print -rl -- 'import os, signal, sys, time' 'signal.signal(signal.SIGHUP, signal.SIG_IGN)' \
+    'open(sys.argv[1], "w").write(str(os.getpid()))' 'time.sleep(60)' > "$wd/editor.py"
+  print -rl -- "source ${(q)repo}/zsh/hxp-main.zsh" 'zmodload zsh/system' "trap '' HUP" \
+    'shell_pid=$sysparams[pid]' \
+    "{ _hxp_hangup_watchdog \$shell_pid python3 ${(q)${commands[python3]:A:t}} && print -r -- cleaned > ${(q)wd}/cleaned } &!" \
+    "python3 ${(q)wd}/editor.py ${(q)wd}/editor.pid" > "$wd/session.zsh"
+  script -qfc "zsh -f ${(q)wd}/session.zsh" /dev/null </dev/null >/dev/null 2>&1 &
+  terminal=$!
+  for attempt in {1..100}; do [[ -s "$wd/editor.pid" ]] && break; sleep 0.05; done
+  editor_pid="$(<"$wd/editor.pid")"
+  sleep 0.2
+  check 'the watchdog leaves a live session alone' alive "$(kill -0 "$editor_pid" 2>/dev/null && print alive || print gone)"
+  kill -KILL "$terminal"   # closing the terminal hangs up the session
+  for attempt in {1..100}; do [[ -s "$wd/cleaned" ]] && ! kill -0 "$editor_pid" 2>/dev/null && break; sleep 0.05; done
+  check 'a hangup stops an editor that ignores SIGHUP' gone "$(kill -0 "$editor_pid" 2>/dev/null && print alive || print gone)"
+  check 'a hangup runs the session cleanup' cleaned "$(cat "$wd/cleaned" 2>/dev/null)"
+  kill -KILL "$editor_pid" 2>/dev/null
+  exit "$fail"
+) || fail=1
+else
+  print -r -- '    - skipped (needs script and python3)'
+fi
 
 print -r -- '  [error page folding]'
 check 'folds long log lines' $'abcd\nefgh\nij\nkl' "$(print -rl -- abcdefghij kl | _hxp_fold 4)"
@@ -165,7 +387,12 @@ EOF
       check 'unreachable editor reports failure inside fancy-cat' 1 "$rc"
       check 'fancy-cat never gets a second editor' no "$([[ -e "$HXP_TEST_SPAWNED" ]] && print yes || print no)"
     else
-      check 'GUI viewers still fall back to a new editor' "${project:A}/main.tex:3" "$(cat "$HXP_TEST_SPAWNED" 2>/dev/null)"
+      check 'GUI viewers never start an editor without a terminal' 1 "$rc"
+      check 'no terminal, no spawned editor' no "$([[ -e "$HXP_TEST_SPAWNED" ]] && print yes || print no)"
+      if (( $+commands[script] )); then
+        script -qec "bash ${(q)repo}/bin/hxp-jump ${(q)project}/main.tex:3" /dev/null >/dev/null 2>&1 </dev/null
+        check 'a terminal still gets a new editor' "${project:A}/main.tex:3" "$(cat "$HXP_TEST_SPAWNED" 2>/dev/null)"
+      fi
     fi
   done
   exit "$fail"

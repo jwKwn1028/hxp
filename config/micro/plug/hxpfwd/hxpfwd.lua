@@ -12,11 +12,10 @@ function hxpfwd(bp)
         return
     end
 
-    -- Convert Micro coordinates to 1-based SyncTeX positions.
     local line = tostring(bp.Cursor.Y + 1)
     local col  = tostring(bp.Cursor.X + 1)
 
-    -- Run asynchronously; Typst text extraction can be slow. Buffer errors for onExit.
+    -- Keep searches asynchronous.
     shell.JobSpawn("hxp-fwd", {bp.Buf.AbsPath, line, col}, nil, nil, onHxpFwdExit)
 end
 
@@ -31,12 +30,11 @@ function hxperror(bp)
     local output, err = shell.RunCommand("hxp-first-error")
     local text = output:match("^%s*(.-)%s*$")
     if err ~= nil then
-        -- A helper that cannot start produces no output.
         if text == "" then text = "hxp-first-error: " .. tostring(err) end
         micro.InfoBar():Error(text)
         return
     end
-    -- A bare path is a Markdown error with no mappable line.
+    -- Bare paths have no mapped Markdown line.
     local path, line, col = text:match("^(.*):(%d+):(%d+)$")
     if not path then path = text end
     if path == "" then return end
