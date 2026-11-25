@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Source/PDF routing with private tmux servers."""
 
 import hashlib
 import json
@@ -17,8 +16,6 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 class SessionRoutingTests(unittest.TestCase):
-    """Record editor routing through mock tmux."""
-
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix="hxp-jump-routing-")
         self.addCleanup(temp.cleanup)
@@ -169,8 +166,6 @@ render fail
 
 
 class TypstForwardCacheTests(unittest.TestCase):
-    """Cache page text until the PDF changes."""
-
     def test_page_text_is_cached_per_build(self):
         with tempfile.TemporaryDirectory(prefix="hxp-fwd-cache-") as directory:
             root = Path(directory)

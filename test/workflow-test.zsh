@@ -1,5 +1,4 @@
 #!/usr/bin/env zsh
-# Session and build-option regressions.
 emulate -L zsh
 set -u
 
@@ -106,6 +105,60 @@ else
   print -r -- '    - skipped (needs watchexec, inotifywait and pandoc)'
 fi
 
+print -r -- '  [saves during a build are queued]'
+if (( $+commands[inotifywait] )); then
+(
+  # Fake build: read source, write hxp's generated paths, sleep.
+  qbin="$work/queue-bin"
+  mkdir -p "$qbin"
+  print -rl -- '#!/bin/sh' \
+    'content=$(cat "$1"); echo start >> "$Q_LOG"' \
+    'gen() { mkdir -p "${10}"; for f in "$5" "$6" "$7" "$8" "$9" "${10}/$4.hxp.tex" "${5%.pdf}.synctex.gz"; do printf x > "$f"; done; }' \
+    'gen "$@"; sleep 1; gen "$@"' \
+    'printf "%s\n" "$content" > "$Q_OUT"; echo done >> "$Q_LOG"' > "$qbin/hxp-compile"
+  chmod +x "$qbin/hxp-compile"
+  export PATH="$qbin:$PATH" XDG_RUNTIME_DIR="$work/queue-runtime"
+  _hxp_need_cmd() { [[ "$1" == (pandoc|latexmk) ]] || (( $+commands[$1] )) }
+  _hxp_compile_once() { "$qbin/hxp-compile" "$@" }
+  modes=(inotify)
+  if (( $+commands[watchexec] )); then
+    modes+=(watchexec)
+  else
+    print -r -- '    - watchexec mode skipped (needs watchexec)'
+  fi
+  for mode in $modes; do
+    for ext in md tex; do
+      d="$work/queue $mode $ext"
+      src="$d/doc.$ext"
+      mkdir -p "$d"
+      export Q_LOG="$d/log" Q_OUT="$d/out"
+      : > "$Q_LOG"
+      print -rl -- '\documentclass{article}' v1 > "$src"
+      HXP_NO_WATCHEXEC="${${mode:#watchexec}:+1}" wpdf -q --no-initial "$src" >/dev/null 2>&1 &
+      wpid=$!
+      for attempt in {1..200}; do
+        grep -q start "$Q_LOG" && break
+        (( attempt % 10 == 1 )) && print -rl -- '\documentclass{article}' v1 > "$src"
+        sleep 0.05
+      done
+      print -rl -- '\documentclass{article}' v2 > "$src"
+      for attempt in {1..200}; do
+        (( $(grep -c done "$Q_LOG") >= 2 )) && break
+        sleep 0.05
+      done
+      # Catch self-triggered rebuilds.
+      sleep 1.5
+      pkill -TERM -P "$wpid" 2>/dev/null; kill -TERM "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+      check "$mode $ext builds a save made during a build" v2 "$(tail -1 "$Q_OUT" 2>/dev/null)"
+      check "$mode $ext runs exactly one follow-up build" 2 "$(grep -c start "$Q_LOG")"
+    done
+  done
+  exit "$fail"
+) || fail=1
+else
+  print -r -- '    - skipped (needs inotifywait)'
+fi
+
 print -r -- '  [markdown build options]'
 (
   mkdir -p "$work/md-options"
@@ -134,7 +187,6 @@ print -r -- '  [markdown build options]'
 print -r -- '  [CJK in configured bibliographies]'
 if (( $+commands[pandoc] )); then
 (
-  # Test bundled filter lookup through the installed symlink.
   ln -s "$repo/zsh/hxp-lib.zsh" "$work/installed-lib.zsh"
   source "$work/installed-lib.zsh"
   d="$work/md-bibliographies"
@@ -144,7 +196,6 @@ if (( $+commands[pandoc] )); then
   export HXP_CJK_FONT_RESOLVED='Test CJK'
   unset HXP_CJK_FONT
   _hxp_need_cmd() { [[ "$1" == (latexmk|xelatex) ]] }
-  # Generate TeX without invoking LaTeX.
   pandoc() { command pandoc "$@"; return 1 }
   _hxp_make_error_pdf() { return 1 }
   for form in scalar inline-list block-list english override; do

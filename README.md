@@ -18,9 +18,8 @@ Add to `~/.zshrc`, put `~/.local/bin` on `PATH`, and reload:
 [[ -r "$HOME/.zsh/hxp-main.zsh" ]] && source "$HOME/.zsh/hxp-main.zsh"
 ```
 
-Rerun the installer after updates. `--no-config` preserves viewer configs;
-chezmoi uses it and supplies Ctrl+L bindings. Dependencies: `./install.sh --deps`.
-Check setup with `hxp --doctor`.
+Rerun the installer after updates (`--no-config` keeps viewer configs, `--deps`
+installs dependencies), then check with `hxp --doctor`.
 
 ## Use
 
@@ -31,7 +30,3 @@ hxp slides.typ
 wpdf notes.md           # watcher only
 hxp_errs paper.tex      # live diagnostics
 ```
-
-Ctrl+L follows the cursor into the PDF; in fancy-cat it returns to source.
-Ctrl+click also returns to source. LaTeX/Markdown use SyncTeX; Typst matches prose.
-See [search setup](manual.md#inverse-search-pdf--editor).

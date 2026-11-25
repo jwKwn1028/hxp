@@ -150,7 +150,6 @@ if [[ -n "${HXP_PREVIEW_SRC:-}" ]] && { [[ "$state_src" != "$session_src" ]] || 
   exit 1
 fi
 
-# Search ancestor sessions only for unpinned previews.
 if [[ -z "${HXP_PREVIEW_SRC:-}" && -z "$tmux_pane" && -z "$window_id" ]]; then
   reported_dir="$(dirname "$realfile")"
   for sf in "$state_dir"/*.state; do

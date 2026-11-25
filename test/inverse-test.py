@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Inverse source lookup regressions."""
 
 import hashlib
 import os

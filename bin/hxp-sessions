@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Live sessions as TSV: TMUX_SOCKET TMUX_PANE EDITOR VIEWER VIEWER_SOCKET SOURCE.
-# Empty targets stay empty; fancy-cat requires a socket. Never modifies state.
 
 set -u
 

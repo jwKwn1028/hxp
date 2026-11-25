@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Usage: hxp-typtext <typ-file> <line> [--context]
-# Print prose candidates, longest first.
 
 set -u
 

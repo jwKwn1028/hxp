@@ -12,7 +12,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install lint tools
-        run: sudo apt-get update && sudo apt-get install -y zsh tmux shellcheck gawk mawk lua5.4 pandoc
+        run: sudo apt-get update && sudo apt-get install -y zsh tmux shellcheck gawk mawk lua5.4 pandoc inotify-tools
+
+      - name: Install watchexec
+        run: |
+          asset=watchexec-2.5.1-x86_64-unknown-linux-musl
+          curl -fsSL "https://github.com/watchexec/watchexec/releases/download/v2.5.1/${asset}.tar.xz" -o watchexec.tar.xz
+          echo "9efabd08de720c1ee7e57b487fe11904f0966828e76146e2b5ea5deee90626be  watchexec.tar.xz" | sha256sum -c -
+          tar -xJf watchexec.tar.xz
+          sudo install "${asset}/watchexec" /usr/local/bin/watchexec
+          watchexec --version
 
       - name: zsh syntax check
         run: |
@@ -64,7 +73,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             zsh pandoc texlive-xetex texlive-latex-extra latexmk inotify-tools \
-            fonts-noto-cjk poppler-utils
+            texlive-lang-cjk fonts-noto-cjk poppler-utils
+
+      - name: Install watchexec
+        run: |
+          asset=watchexec-2.5.1-x86_64-unknown-linux-musl
+          curl -fsSL "https://github.com/watchexec/watchexec/releases/download/v2.5.1/${asset}.tar.xz" -o watchexec.tar.xz
+          echo "9efabd08de720c1ee7e57b487fe11904f0966828e76146e2b5ea5deee90626be  watchexec.tar.xz" | sha256sum -c -
+          tar -xJf watchexec.tar.xz
+          sudo install "${asset}/watchexec" /usr/local/bin/watchexec
+          watchexec --version
 
       - name: Install typst
         run: |

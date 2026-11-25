@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Usage: hxp-texline <md-file> <tex-file> <md-line>
-# Print a matching TeX line, or nothing.
 
 set -u
 
@@ -76,7 +75,6 @@ floor_anchor_for() {
   return 0
 }
 
-# Disambiguate using preceding prose.
 search_floor() {
   local i cand hit
   for (( i = md_line - 1; i >= 1 && i > md_line - 25; i-- )); do

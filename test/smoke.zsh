@@ -1,5 +1,4 @@
 #!/usr/bin/env zsh
-# Build and watch regressions; skip unavailable toolchains.
 
 emulate -L zsh
 set -u
@@ -47,6 +46,43 @@ if _hxp_need_cmd pandoc; then
     "$(grep -qF -- '\undefinedcontrolsequence' "$d/.a.error.md" && print yes || print no)"
   if _hxp_need_cmd typst; then
     check 'md error page is rendered by Typst' yes "$(grep -aq 'Typst' "$d/a.pdf" && print yes || print no)"
+  fi
+
+  if _hxp_need_cmd latexmk && _hxp_need_cmd watchexec && _hxp_need_cmd inotifywait && _hxp_need_cmd pdftotext; then
+    print -r -- '  [markdown save during a watchexec build]'
+    (
+      source "$repo/zsh/hxp-main.zsh"
+      source "$repo/zsh/hxp-lib.zsh"
+      unset HXP_NO_WATCHEXEC HXP_KEEP_LAST_GOOD
+      d="$work/md-queue"
+      mkdir -p "$d"
+      src="$d/q.md" pdf="$d/q.pdf" generated="$d/.hxp_build_q/q.hxp.tex"
+      words() { pdftotext "$pdf" - 2>/dev/null | grep -o 'VERSION[a-z]*' }
+      print -rl -- '# Queue' '' 'VERSIONone' > "$src"
+      wpdf -q "$src" > "$d/watcher.log" 2>&1 &
+      queue_pid=$!
+      trap 'pkill -TERM -P "$queue_pid" 2>/dev/null; kill -TERM "$queue_pid" 2>/dev/null; wait "$queue_pid" 2>/dev/null' EXIT
+      for attempt in {1..1200}; do
+        [[ "$(words)" == VERSIONone ]] && break
+        sleep 0.1
+      done
+      # Save again once Pandoc is done, while latexmk runs.
+      for attempt in {1..1200}; do
+        grep -q VERSIONtwo "$generated" 2>/dev/null && break
+        (( attempt % 10 == 1 )) && print -rl -- '# Queue' '' 'VERSIONtwo' > "$src"
+        sleep 0.05
+      done
+      print -rl -- '# Queue' '' 'VERSIONthree' > "$src"
+      for attempt in {1..1200}; do
+        [[ "$(words)" == VERSIONthree ]] && break
+        sleep 0.1
+      done
+      check 'md save during a build is published' VERSIONthree "$(words)"
+      published="$(_hxp_pdf_identity "$pdf")"
+      sleep 4
+      check 'md watch settles after the queued build' "$published" "$(_hxp_pdf_identity "$pdf")"
+      exit "$fail"
+    ) || fail=1
   fi
 
   if _hxp_need_cmd xelatex && _hxp_need_cmd pdftotext && cjk_font="$(_hxp_cjk_font)"; then
@@ -173,7 +209,6 @@ if _hxp_need_cmd typst; then
   check "typ bad rc"        1 "$rc"
   check "typ bad error pdf" 1 "$(is_pdf "$d/a.pdf" && echo 1 || echo 0)"
 
-  # Refresh errors until the first successful build.
   d="$work/typ first failure"; mkdir -p "$d"
   print -rl -- '= Bad' '#let x =' >| "$d/a.typ"
   HXP_KEEP_LAST_GOOD=1 compile "$d/a.typ" typ
@@ -213,7 +248,6 @@ if _hxp_need_cmd typst; then
   check "watch fail -> error pdf"  1 "$(is_pdf "$pdf" && echo 1 || echo 0)"
   check "watch fail -> err_log"    1 "$(grep -q 'expected expression' "$errlog" && echo 1 || echo 0)"
 
-  # Render errors while the watch pipe stays open.
   zmodload zsh/datetime
   rm -f -- "$pdf"
   started=$EPOCHREALTIME

@@ -71,7 +71,6 @@ if [[ -n "$state_pid" ]] && ! pid_alive "$state_pid"; then
   state_viewer_windowid=""; state_window_known=0
 fi
 
-# Included sources can use ancestor sessions.
 if [[ -z "$state_pdf" ]]; then
   for sf in "$state_dir"/*.state; do
     [[ -r "$sf" && "$sf" != "$state_file" ]] || continue

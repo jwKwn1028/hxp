@@ -54,7 +54,6 @@ wait_for '[ "$(panes)" = 1 ] && [ -s "$tmp/out" ]' || fail "panes=$(panes), out=
 [ "$(cat "$tmp/out")" = "$src|micro|$tmp/doc dir|-l" ] || fail "respawned with: $(cat "$tmp/out")"
 t kill-server
 
-# Cover both job-control modes.
 for job in "bash -c 'read -r answer'" "set +m; sh -c 'read -r answer'"; do
     rm -f "$tmp/client" "$tmp/out"
     t -f /dev/null new-session -d -s b -x 120 -y 30 -c "$tmp/doc dir" sh

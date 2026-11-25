@@ -1,5 +1,3 @@
-# Build and search helpers.
-
 _hxp_need_cmd() { command -v "$1" >/dev/null 2>&1 }
 _hxp_abs() { print -r -- "${1:A}" }
 
@@ -11,14 +9,12 @@ fi
 # zf_mv cannot cross filesystems.
 _hxp_mv() { zf_mv -f -- "$1" "$2" 2>/dev/null || command mv -f -- "$1" "$2" }
 
-# Use POSIX awk; HXP_AWK selects the binary.
 _hxp_awk() {
   local REPLY
   _hxp_awk_reply
   print -r -- "$REPLY"
 }
 
-# Set REPLY to the awk binary.
 _hxp_awk_reply() {
   if [[ -n "$HXP_AWK" ]]; then REPLY="$HXP_AWK"
   elif _hxp_need_cmd gawk; then REPLY=gawk
@@ -34,7 +30,6 @@ _hxp_gui_viewer() {
   return 1
 }
 
-# Print why splitting is unavailable.
 _hxp_split_check() {
   emulate -L zsh
   local why=""
@@ -79,7 +74,6 @@ _hxp_editor_bin() {
   esac
 }
 
-# One argument per line; omit empty positions.
 _hxp_editor_argv() {
   emulate -L zsh
   local editor="$1" file="$2" line="$3" col="$4"
@@ -228,7 +222,6 @@ _hxp_cjk_font() {
     print -r -- "$HXP_CJK_FONT"
     return 0
   fi
-  # Cached per watcher; empty means unavailable.
   if (( ${+HXP_CJK_FONT_RESOLVED} )); then
     [[ -n "$HXP_CJK_FONT_RESOLVED" ]] || return 1
     print -r -- "$HXP_CJK_FONT_RESOLVED"
@@ -273,7 +266,6 @@ _hxp_bib_for() {
   print -r -- "${bibs[1]}"
 }
 
-# Set reply to declared frontmatter keys.
 _hxp_md_declared_keys() {
   emulate -L zsh
   local src="$1" awk_bin
@@ -310,7 +302,6 @@ _hxp_watch_exts() {
   esac
 }
 
-# Ignore generated files to prevent rebuild loops.
 _hxp_watch_match() {
   emulate -L zsh
   local ext="$1" path="$2" cbase="${2:t}"
@@ -320,10 +311,9 @@ _hxp_watch_match() {
   [[ "$exts" == *",${cbase:e},"* ]]
 }
 
-# Notify the session preview; GUI viewers reload themselves.
 _hxp_reload_viewer() {
   [[ "${HXP_VIEWER_KIND:-}" == fancy-cat && -S "${HXP_VIEWER_SOCKET:-}" ]] || return 0
-  # Polling covers unsupported or missed notifications.
+  # Polling is the fallback.
   fancy-cat --remote "$HXP_VIEWER_SOCKET" reload >/dev/null 2>&1 || true
 }
 
@@ -415,7 +405,6 @@ _hxp_error_location() {
   _hxp_awk_reply; awk_bin="$REPLY"
 
   loc="$("$awk_bin" -v fallback="$fallback" '
-    # LaTeX: file.tex:line:
     /\.tex:[0-9]+:/ {
       if (match($0, /\.tex:[0-9]+:/)) {
         f = substr($0, 1, RSTART + 3)
@@ -424,7 +413,6 @@ _hxp_error_location() {
         done = 1; exit
       }
     }
-    # Typst: file.typ:line:column
     /:[0-9]+:[0-9]+[[:space:]]*$/ {
       s = $0; sub(/[[:space:]]+$/, "", s)
       c = s; sub(/^.*:/, "", c)
@@ -436,7 +424,7 @@ _hxp_error_location() {
       printf "%s\t%s\t%s\n", f, l, c
       done = 1; exit
     }
-    # TeX: l.NN, using the prior <*> filename.
+    # l.NN belongs to the preceding <*> file.
     /^l\.[[:space:]]*[0-9]+/ {
       n = $0; sub(/^l\.[[:space:]]*/, "", n); sub(/[^0-9].*$/, "", n)
       printf "%s\t%s\t\n", (file == "" ? fallback : file), n
@@ -477,7 +465,6 @@ _hxp_error_pos_for() {
   fi
 }
 
-# Optional $4 forwards the parsed location.
 _hxp_editor_target_for_error() {
   emulate -L zsh
   local editor="$1" src="$2" err_log="$3" file line col
@@ -588,7 +575,6 @@ _hxp_fold() {
   done
 }
 
-# Write Markdown and optional plain-text Typst sections; preserve backslashes.
 _hxp_write_error_md() {
   emulate -L zsh
   local src="$1" ext="$2" err_log="$3" err_md="$4" debug_tex="$5" parts="${6:-}"
@@ -711,7 +697,6 @@ _hxp_make_typst_error_pdf() {
 }
 
 # Set reply to font arguments and REPLY to the CJK family.
-# Use bundled fonts plus a runtime CJK link.
 _hxp_typst_font_args() {
   emulate -L zsh
   reply=( --ignore-system-fonts )
@@ -785,7 +770,6 @@ _hxp_make_typst_report_pdf() {
   typst compile --root "$parts" "${fonts[@]}" "$parts/report.typ" "$temp_pdf" >/dev/null 2>&1
 }
 
-# Set REPLY to the cached or computed error-PDF marker.
 _hxp_error_pdf_marker() {
   emulate -L zsh
   if [[ -n "${HXP_ERRPDF_MARKER:-}" && "$1" == "${HXP_ERRPDF_PDF:-}" ]]; then
@@ -829,7 +813,6 @@ _hxp_make_error_pdf() {
   local pdf="$7" parts="" render=1
   local -a pdf_engine
 
-  # Preserve good PDFs; refresh existing error pages.
   if [[ "${HXP_KEEP_LAST_GOOD:-}" == 1 && -s "$pdf" ]] && ! _hxp_is_error_pdf "$pdf"; then
     render=0
   fi
@@ -909,7 +892,7 @@ _hxp_typst_render_state() {
   return 0
 }
 
-# Publish successes immediately; flush errors after 100ms of silence.
+# Errors flush after 100ms of silence.
 _hxp_typst_watch_render() {
   emulate -L zsh
   local src="$1" ext="$2" err_log="$3" err_md="$4" temp_pdf="$5" debug_tex="$6" pdf="$7"
@@ -983,14 +966,12 @@ _hxp_compile_once() {
         cite_args=( --citeproc --bibliography="$bib" )
       fi
 
-      # Load xeCJK only when needed.
       local -a cjk_args
       if (( ! ${declared[(Ie)CJKmainfont]} )); then
         if [[ -n "$HXP_CJK_FONT" ]] || _hxp_has_cjk "$src" "$dir"/*.bib(N); then
           local cjk_font; cjk_font="$(_hxp_cjk_font)"
           [[ -n "$cjk_font" ]] && pdf_vars+=( -V "CJKmainfont=$cjk_font" )
         elif (( ${declared[(Ie)bibliography]} )); then
-          # Let Pandoc parse bibliography metadata.
           local -x HXP_CJK_FONT_RESOLVED="$(_hxp_cjk_font)"
           [[ -n "$HXP_CJK_FONT_RESOLVED" ]] && cjk_args=(
             --lua-filter "${${(%):-%x}:A:h:h}/filters/cjk-bibliography.lua"
@@ -1047,7 +1028,6 @@ _hxp_compile_once() {
           debug_tex="$synctex_tex"
         fi
       else
-        # Direct Pandoc cannot retain SyncTeX.
         local -a pdf_engine
         if _hxp_need_cmd xelatex; then
           pdf_engine=( --pdf-engine=xelatex )
@@ -1095,7 +1075,6 @@ _hxp_compile_once() {
         if [[ -f "$build_dir/$root_stem.pdf" ]]; then
           _hxp_mv "$build_dir/$root_stem.pdf" "$temp_pdf"
           if [[ -f "$build_dir/$root_stem.synctex.gz" ]]; then
-            # Publish root sidecars atomically.
             _hxp_mv "$build_dir/$root_stem.synctex.gz" "${pdf:h}/$root_stem.synctex.gz" 2>/dev/null
           fi
           ok=0

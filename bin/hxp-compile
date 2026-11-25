@@ -1,4 +1,4 @@
 #!/usr/bin/env zsh
 emulate -L zsh
-source "${HOME}/.zsh/hxp-lib.zsh"
+source "${0:A:h:h}/zsh/hxp-lib.zsh" || exit 2
 _hxp_compile_once "$@"

@@ -1,5 +1,4 @@
 #!/usr/bin/env zsh
-# Parser/mapping tests across installed awk implementations.
 
 emulate -L zsh
 set -u
@@ -177,7 +176,6 @@ check "blank line falls outward"    7  "$(tl 2)"
 check "line past EOF"              ""  "$(tl 9999)"
 check "missing tex file"           ""  "$("$repo/bin/hxp-texline" "$tl_md" "$work/nope.tex" 3)"
 
-# Distinguish TOC entries from repeated headings.
 tl2_md="$work/toc.md"
 tl2_tex="$work/toc.hxp.tex"
 cat >| "$tl2_md" <<'EOF'

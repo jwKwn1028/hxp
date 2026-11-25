@@ -11,7 +11,6 @@ IFS=$'\t' read -r file line col <<< "$(_hxp_error_pos_for "$src" "$base.log")"
 [[ -n "$line" ]] || { print -u2 -- 'Compiler reported no source location'; exit 1; }
 if [[ "$src" == *.md && "$file" == *.hxp.tex ]]; then
   mapped="$(_hxp_guess_md_line_from_tex "$src" "$file" "$line")"
-  # Unmapped errors open Markdown without a line.
   if [[ -z "$mapped" ]]; then print -r -- "$src"; exit 0; fi
   file="$src"; line="$mapped"; col=1
 fi

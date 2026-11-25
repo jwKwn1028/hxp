@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Usage: hxp-mdline <md-file> <tex-file> <tex-line>
-# Match Markdown using nearby TeX tokens.
 
 set -u
 

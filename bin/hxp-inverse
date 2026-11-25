@@ -187,7 +187,7 @@ def classify(source):
                 else:
                     i += 1
             elif char == "[":
-                stack.append(("text", "]", False))  # text brackets
+                stack.append(("text", "]", False))
                 i += 1
             else:  # "]"
                 if mode == "markup":
@@ -241,7 +241,6 @@ def classify(source):
 
 
 def keep(source, kinds, classes):
-    """Blank other classes, preserving offsets and newlines."""
     hidden = re.compile(b"[^" + re.escape(bytes(sorted(classes))) + b"]+")
     pieces, start = [], 0
     for match in hidden.finditer(kinds):
@@ -253,7 +252,6 @@ def keep(source, kinds, classes):
 
 
 def source_files(entry, root):
-    """Follow literal local Typst imports/includes within root."""
     pending, seen = [entry], set()
     while pending:
         path = pending.pop().resolve()
@@ -299,10 +297,7 @@ def tokens(text):
 
 
 def occurrences(hits, length):
-    """Merge nearby, ordered hits from disjoint query spans.
-
-    Repeated query spans remain ambiguous.
-    """
+    """Merge nearby, ordered hits from disjoint query spans."""
     hits = list(hits.items())
     parent = list(range(len(hits)))
 
@@ -341,8 +336,7 @@ def typst_location(pdf, state, text):
         for pos, word in enumerate(words):
             positions.setdefault(word, []).append(pos)
         documents.append((path, source, items, words, positions))
-    # Prefer the longest shared phrase. Alignment collapses overlapping windows
-    # from one occurrence without choosing arbitrarily between repeated phrases.
+    # Prefer the longest shared phrase; never pick arbitrarily among repeats.
     minimum = min(3, len(query))
     for size in range(min(24, len(query)), minimum - 1, -1):
         hits = {}

@@ -1,5 +1,3 @@
-# Source from .zshrc.
-
 [[ -r "$HOME/.zsh/hxp-lib.zsh" ]] && source "$HOME/.zsh/hxp-lib.zsh"
 
 _hxp_claim_split() {
@@ -53,7 +51,6 @@ _hxp_ghostty_pid() {
   return 1
 }
 
-# Return the unique new shell as pid:start.
 _hxp_new_split_shell() {
   emulate -L zsh
   local term_pid="$1" before="$2" child env found=""
@@ -82,7 +79,6 @@ _hxp_release_split() {
        grep -Fzxq -- "$preview_dir/socket" "/proc/$pid/cmdline"; then
       kill -TERM "$pid" 2>/dev/null
     elif [[ -n "$shell_pid" && "$(_hxp_proc_start "$shell_pid")" == "${preview_shell#*:}" ]]; then
-      # Close an unclaimed Ghostty split.
       pkill -HUP -P "$shell_pid" 2>/dev/null
       kill -HUP "$shell_pid" 2>/dev/null
     fi
@@ -141,11 +137,9 @@ _hxp_start_split() {
   }
 }
 
-# Stop HUP-ignoring editors after tty loss; succeed so the caller cleans up.
-# Poll /proc once per second.
+# Stop HUP-ignoring editors after tty loss.
 _hxp_hangup_watchdog() {
   emulate -L zsh
-  # Survive hangup; cleanup stops this process with SIGTERM.
   trap '' HUP INT
   trap - TERM
   local shell_pid="$1" stat child children
@@ -399,7 +393,6 @@ wpdf() {
     local root_src; root_src="$(_hxp_root_for "$src" typ)"
     local root_dir="${root_src:h}"
 
-    # Retain watch output for error recovery.
     local watch_pdf="${temp_pdf:r}.watch.pdf"
     (cd -- "$root_dir" && typst watch --root "$root_dir" "$root_src" "$watch_pdf") 2>&1 \
       | _hxp_typst_watch_render "$src" "$ext" "$err_log" "$err_md" "$temp_pdf" "$debug_tex" "$pdf" "$watch_pdf"
@@ -415,11 +408,12 @@ wpdf() {
 
   if _hxp_need_cmd watchexec && [[ "$HXP_NO_WATCHEXEC" != "1" ]]; then
     (( quiet == 0 )) && print -- "wpdf: watchexec mode"
-    # Run directly to preserve spaces; ignore generated files to prevent loops.
+    # -n avoids shell word splitting.
     watchexec \
       -n \
       --debounce 50ms \
       --postpone \
+      --on-busy-update=queue \
       --no-process-group \
       --no-vcs-ignore \
       --quiet \

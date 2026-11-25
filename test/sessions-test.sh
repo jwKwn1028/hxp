@@ -28,7 +28,6 @@ state() {  # name, then lines
 start="$(started "$owner")"
 state live "src=/docs/a b.typ" editor=helix "tmux=/tmp/tmux-1000/default,42,0" tmux_pane=%3 \
   "pid=$owner" "pid_start=$start" "viewer_socket=$work/live.sock" viewer=fancy-cat
-# Accept legacy state without start times.
 state older src=/docs/c.md editor=micro "pid=$owner" viewer=zathura "viewer_socket=$work/ignored"
 state dead src=/docs/d.md editor=helix "pid=$dead" viewer=zathura
 state reused src=/docs/e.md editor=helix "pid=$owner" pid_start=1 viewer=zathura

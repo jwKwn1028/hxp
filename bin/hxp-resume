@@ -1,6 +1,5 @@
 #!/bin/sh
 # hxp-resume PANE_INDEX helix|micro SOURCE, saved in the viewer pane.
-# Wait for tmux restore and an idle editor shell; @hxp-resume tracks its pane ID.
 set -eu
 
 if [ "$#" -ne 3 ] || [ -z "${TMUX_PANE:-}" ]; then
