@@ -490,7 +490,7 @@ EOF
 
 print -r -- '  [hxp session wiring]'
 (
-  export XDG_RUNTIME_DIR="$work/session-runtime" HXP_NO_TILE=1
+  export XDG_RUNTIME_DIR="$work/session-runtime" HXP_NO_TILE=1 HXP_NO_NATIVE_TYP=1
   _hxp_need_cmd() { return 0 }
   _hxp_viewer() { print sioyek }
   _hxp_editor_window_id() { print 0xeee }

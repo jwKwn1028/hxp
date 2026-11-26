@@ -450,6 +450,14 @@ wpdf() {
 }
 
 
+_hxp_stop_watcher() {
+  [[ -n "$1" ]] || return 0
+  pkill -TERM -P "$1" 2>/dev/null
+  kill -TERM "$1" 2>/dev/null
+  wait "$1" 2>/dev/null
+  return 0
+}
+
 hxp() {
   emulate -L zsh
   setopt pipefail
@@ -526,8 +534,51 @@ hxp() {
     print -r -- "pid_start=$(_hxp_proc_start $$)"
   } >| "$state_file" 2>/dev/null
 
-  local initial_ok=0
-  if _hxp_compile_once "$src" "$ext" "$dir" "$stem" "$pdf" \
+  local initial_ok=0 wpid="" startup_dir=""
+  local watchdog_pid="" viewer_wid="" zpid=""
+  cleanup() {
+    [[ -n "$watchdog_pid" ]] && kill -TERM "$watchdog_pid" 2>/dev/null
+    _hxp_stop_watcher "$wpid"
+    [[ -n "$startup_dir" ]] && rm -rf -- "$startup_dir"
+
+    if [[ "$viewer" == fancy-cat ]]; then
+      _hxp_release_split
+    else
+      _hxp_close_viewer "$viewer" "$zpid" "$viewer_wid"
+    fi
+
+    rm -f -- "$temp_pdf" "${temp_pdf:r}.watch.pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_tex" "$synctex_gz" 2>/dev/null
+    rm -rf -- "$build_dir" 2>/dev/null
+    [[ -n "$state_file" ]] && rm -f -- "$state_file" "$state_file.buf" 2>/dev/null
+    rm -f -- "${$(_hxp_state_file "$pdf"):r}.pdftext" 2>/dev/null
+  }
+
+  trap 'cleanup; return 130' INT
+  trap 'cleanup; return 143' TERM HUP
+
+  # Reuse the native watcher's first build, including its error-PDF handling.
+  if [[ "$ext" == typ && "${HXP_NO_NATIVE_TYP:-}" != 1 ]] &&
+      _hxp_need_cmd typst && zmodload zsh/zselect 2>/dev/null; then
+    startup_dir="$(mktemp -d "${state_file:h}/watch.XXXXXXXX")"
+    if [[ -n "$startup_dir" ]]; then
+      HXP_STARTUP_RESULT="$startup_dir/result" HXP_VIEWER_ROUTE="$startup_dir/viewer" \
+        HXP_VIEWER_KIND="$viewer" HXP_VIEWER_SOCKET='' \
+        wpdf -q --no-initial "$src" >/dev/null 2>&1 &!
+      wpid=$!
+      while [[ ! -s "$startup_dir/result" ]] && kill -0 "$wpid" 2>/dev/null; do
+        zselect -t 5
+      done
+      if [[ -s "$startup_dir/result" ]]; then
+        [[ "$(<"$startup_dir/result")" == 0 ]] && initial_ok=1
+      else
+        # An early watch exit retains the one-shot build and fallback watcher.
+        _hxp_stop_watcher "$wpid"
+        wpid=''
+        local -x HXP_NO_NATIVE_TYP=1
+      fi
+    fi
+  fi
+  if [[ -z "$wpid" ]] && _hxp_compile_once "$src" "$ext" "$dir" "$stem" "$pdf" \
       "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$build_dir" >/dev/null; then
     initial_ok=1
   fi
@@ -541,14 +592,19 @@ hxp() {
       _hxp_release_split
       viewer="$(_hxp_gui_viewer)" || {
         print -u2 -- 'hxp: could not start fancy-cat in a right split and no fallback viewer is installed'
-        _hxp_sweep_artifacts "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" "$build_dir"
-        rm -f -- "$state_file"
+        cleanup
+        trap - INT TERM HUP
         return 2
       }
       print -u2 -- "hxp: could not start fancy-cat in a right split; using $viewer"
     fi
   fi
   print -r -- "viewer=$viewer" >> "$state_file"
+  if [[ -n "$startup_dir" ]]; then
+    # A separate route cannot be replaced by another session for the same source.
+    print -rl -- "viewer=$viewer" "viewer_socket=${preview_dir:+$preview_dir/socket}" >| "$startup_dir/viewer.tmp"
+    _hxp_mv "$startup_dir/viewer.tmp" "$startup_dir/viewer"
+  fi
 
   if [[ "$viewer" != fancy-cat ]]; then
     if [[ -n "$editor_wid" ]]; then
@@ -558,7 +614,7 @@ hxp() {
     fi
   fi
 
-  local before_windows="" viewer_wid="" zpid="" track_window=0 launch_lockfd=""
+  local before_windows="" track_window=0 launch_lockfd=""
   local launch_lock="${state_file:h}/viewer-launch.lock"
   if [[ "$viewer" != fancy-cat ]] && command -v wmctrl >/dev/null 2>&1 && wmctrl -l >/dev/null 2>&1; then
     # Serialize launches to preserve window ownership.
@@ -568,8 +624,8 @@ hxp() {
       track_window=1
     else
       print -u2 -- 'hxp: could not lock viewer startup; retry the session'
-      _hxp_sweep_artifacts "$temp_pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_gz" "$build_dir"
-      rm -f -- "$state_file"
+      cleanup
+      trap - INT TERM HUP
       return 2
     fi
   fi
@@ -596,30 +652,11 @@ hxp() {
   print -r -- "viewer_windowid=$viewer_wid" >> "$state_file" 2>/dev/null
   [[ -n "$viewer_wid" ]] && _hxp_wmctrl_tile "$viewer_wid" right id
 
-  HXP_VIEWER_PID=$zpid HXP_VIEWER_KIND=$viewer HXP_VIEWER_SOCKET="${preview_dir:+$preview_dir/socket}" \
-    wpdf -q --no-initial "$src" >/dev/null 2>&1 &!
-  local wpid=$!
-
-
-  local watchdog_pid=""
-  cleanup() {
-    [[ -n "$watchdog_pid" ]] && kill -TERM "$watchdog_pid" 2>/dev/null
-    [[ -n "$wpid" ]] && { pkill -TERM -P "$wpid" 2>/dev/null; kill -TERM "$wpid" 2>/dev/null; }
-
-    if [[ "$viewer" == fancy-cat ]]; then
-      _hxp_release_split
-    else
-      _hxp_close_viewer "$viewer" "$zpid" "$viewer_wid"
-    fi
-
-    rm -f -- "$temp_pdf" "${temp_pdf:r}.watch.pdf" "$err_log" "$err_md" "$debug_tex" "$synctex_tex" "$synctex_gz" 2>/dev/null
-    rm -rf -- "$build_dir" 2>/dev/null
-    [[ -n "$state_file" ]] && rm -f -- "$state_file" "$state_file.buf" 2>/dev/null
-    rm -f -- "${$(_hxp_state_file "$pdf"):r}.pdftext" 2>/dev/null
-  }
-
-  trap 'cleanup; return 130' INT
-  trap 'cleanup; return 143' TERM HUP
+  if [[ -z "$wpid" ]]; then
+    HXP_VIEWER_PID=$zpid HXP_VIEWER_KIND=$viewer HXP_VIEWER_SOCKET="${preview_dir:+$preview_dir/socket}" \
+      wpdf -q --no-initial "$src" >/dev/null 2>&1 &!
+    wpid=$!
+  fi
 
   if [[ "$viewer" != fancy-cat && -n "$editor_wid" && "$HXP_NO_TILE" != "1" ]] && command -v wmctrl >/dev/null 2>&1; then
     wmctrl -ia "$editor_wid" >/dev/null 2>&1

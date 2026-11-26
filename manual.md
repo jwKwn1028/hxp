@@ -18,7 +18,8 @@ wpdf [-q] [--no-initial] FILE # watcher only; quiet; skip first build
 hxp_errs FILE                 # live diagnostics
 ```
 
-`hxp` creates missing sources and builds before opening the editor.
+`hxp` creates missing sources and builds before opening the editor. Typst uses
+the native watcher’s first result for this build, then keeps that watcher running.
 
 ## Preview
 

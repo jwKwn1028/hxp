@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -163,6 +164,243 @@ render fail
         self.notification("%PDF-native\n")
         self.notification("%PDF-error\n")
         self.no_notification()
+
+
+class TypstStartupTests(unittest.TestCase):
+    """The native watcher's first result is also the session's first build."""
+
+    def run_session(self, initial="good", recover=False, fallback=False, keep=False,
+                    disabled=False, watcher=None, abort=False, interrupt=False, replace_state=False, real=False):
+        with tempfile.TemporaryDirectory(prefix="hxp-typst-startup-") as directory:
+            root = Path(directory)
+            tools = root / "bin"
+            tools.mkdir()
+            source = root / "source.typ"
+            source.write_text(initial)
+            (tools / "typst").write_text('''#!/usr/bin/python3
+import os, pathlib, sys, time
+root = pathlib.Path(os.environ["STARTUP_ROOT"])
+with (root / "builds").open("a") as log:
+    log.write(sys.argv[1] + "\\n")
+(root / ("pid-" + str(os.getpid()))).touch()
+if os.environ.get("STARTUP_INTERRUPT") == "1":
+    time.sleep(60)
+if sys.argv[1] == "watch" and os.environ.get("STARTUP_FALLBACK") == "1":
+    sys.exit(2)
+source, output = map(pathlib.Path, sys.argv[-2:])
+previous = None
+while True:
+    text = source.read_text()
+    if text != previous:
+        previous = text
+        print("[time] compiling ...", flush=True)
+        if text == "error":
+            print("error: startup failure", flush=True)
+            print("[time] compiled with errors", flush=True)
+        else:
+            output.write_text("PDF-" + text)
+            print("[time] compiled successfully", flush=True)
+    if sys.argv[1] != "watch":
+        sys.exit(1 if text == "error" else 0)
+    time.sleep(.02)
+''')
+            if real:
+                (tools / "typst").write_text(
+                    '#!/usr/bin/python3\nimport os, pathlib, sys\n'
+                    'root = pathlib.Path(os.environ["STARTUP_ROOT"])\n'
+                    'with (root / "builds").open("a") as log: log.write(sys.argv[1] + "\\n")\n'
+                    '(root / ("pid-" + str(os.getpid()))).touch()\n'
+                    f'os.execv({shutil.which("typst")!r}, ["typst", *sys.argv[1:]])\n')
+            (tools / "typst").chmod(0o700)
+            # Reload requests prove the early watcher learns its eventual socket.
+            (tools / "fancy-cat").write_text('''#!/usr/bin/python3
+import json, os, pathlib, socket, sys
+root = pathlib.Path(os.environ["STARTUP_ROOT"])
+with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sender:
+    sender.sendto(root.joinpath("source.pdf").read_bytes(), sys.argv[2])
+root.joinpath("reloaded").touch()
+''')
+            (tools / "fancy-cat").chmod(0o700)
+            receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            (root / "preview").mkdir()
+            receiver.bind(str(root / "preview/socket"))
+            receiver.settimeout(.1)
+            script = r'''
+source "$1/zsh/hxp-main.zsh"
+source "$1/zsh/hxp-lib.zsh"
+d="$STARTUP_ROOT"
+_hxp_need_cmd() { return 0 }
+typst() { exec "$STARTUP_ROOT/bin/typst" "$@" }
+_hxp_viewer() { print fancy-cat }
+_hxp_editor_window_id() { return 0 }
+_hxp_start_split() {
+  [[ "$STARTUP_ABORT" == 1 ]] && return 1
+  preview_dir="$d/preview"
+  cp "$pdf" "$d/first-preview"
+}
+_hxp_gui_viewer() { return 1 }
+_hxp_release_split() { return 0 }
+_hxp_cjk_font() { return 0 }
+_hxp_make_error_pdf() {
+  print -r -- error > "$4"
+  [[ "${HXP_KEEP_LAST_GOOD:-}" == 1 ]] && return 1
+  print -rn -- PDF-error > "$5"
+}
+_hxp_error_pos_for() { print -r -- "$src"$'\t1\t1' }
+_hxp_editor_open() {
+  print -r -- "$*" > "$d/editor"
+  if [[ "$STARTUP_REPLACE_STATE" == 1 ]]; then
+    print -rl -- viewer=fancy-cat "viewer_socket=$d/unrelated.sock" >| "$state_file"
+  fi
+  if [[ "$STARTUP_RECOVER" == 1 ]]; then
+    print -rn -- recovered > "$src"
+    for attempt in {1..200}; do
+      [[ -e "$d/reloaded" ]] && return 0
+      sleep .02
+    done
+    return 1
+  fi
+}
+if [[ "$STARTUP_WATCHER" == session ]]; then
+  hxp "$d/source.typ"
+else
+  HXP_STARTUP_RESULT="$d/ready" wpdf -q ${=STARTUP_WATCHER} "$d/source.typ" >/dev/null 2>&1 &
+  watcher_pid=$!
+  for attempt in {1..200}; do
+    [[ -s "$d/ready" ]] && break
+    [[ -s "$d/source.pdf" && "$STARTUP_FALLBACK" == 1 ]] && break
+    sleep .02
+  done
+  [[ -s "$d/source.pdf" ]] || exit 1
+  _hxp_stop_watcher "$watcher_pid"
+  cp "$d/source.pdf" "$d/first-preview"
+  : > "$d/editor"
+fi
+'''
+            env = dict(os.environ, STARTUP_ROOT=str(root), XDG_RUNTIME_DIR=str(root / "runtime"),
+                       PATH=str(tools) + ":" + os.environ["PATH"], STARTUP_RECOVER=str(int(recover)),
+                       HXP_NO_NATIVE_TYP=str(int(disabled)), HXP_NO_WATCHEXEC="1", HXP_NO_TILE="1",
+                       STARTUP_WATCHER="session" if watcher is None else watcher,
+                       STARTUP_ABORT=str(int(abort)), STARTUP_INTERRUPT=str(int(interrupt)), STARTUP_FALLBACK=str(int(fallback)),
+                       STARTUP_REPLACE_STATE=str(int(replace_state)))
+            for name in ("HXP_KEEP_LAST_GOOD", "HXP_VIEWER_SOCKET", "HXP_VIEWER_KIND", "HXP_STARTUP_RESULT", "HXP_VIEWER_ROUTE"):
+                env.pop(name, None)
+            if fallback:
+                env["STARTUP_FALLBACK"] = "1"
+            if keep:
+                env["HXP_KEEP_LAST_GOOD"] = "1"
+                (root / "source.pdf").write_text("PDF-last-good")
+            command = ["zsh", "-f", "-c", script, "startup-test", str(REPO)]
+            if interrupt:
+                process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    for _ in range(200):
+                        if list(root.glob("pid-*")):
+                            break
+                        time.sleep(.01)
+                    self.assertTrue(list(root.glob("pid-*")), "native build never started")
+                    process.send_signal(signal.SIGTERM)
+                    _, stderr = process.communicate(timeout=10)
+                    self.assertNotEqual(process.returncode, 0, stderr)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+            else:
+                result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 2 if abort else 0, result.stderr)
+            for record in root.glob("pid-*"):
+                pid = int(record.name[4:])
+                for _ in range(100):
+                    if not Path(f"/proc/{pid}").exists():
+                        break
+                    time.sleep(.01)
+                self.assertFalse(Path(f"/proc/{pid}").exists(), f"orphaned Typst process {pid}")
+            builds = (root / "builds").read_text().splitlines()
+            self.assertFalse(list((root / "runtime/hxp").glob("watch.*")), "startup route directory leaked")
+            first_bytes = (root / "first-preview").read_bytes() if (root / "first-preview").exists() else b""
+            final_bytes = (root / "source.pdf").read_bytes() if (root / "source.pdf").exists() else b""
+            if real:
+                self.assertTrue(first_bytes.startswith(b"%PDF"))
+                self.assertTrue(final_bytes.startswith(b"%PDF"))
+                first, final = hashlib.sha256(first_bytes).hexdigest(), hashlib.sha256(final_bytes).hexdigest()
+            else:
+                first, final = first_bytes.decode(), final_bytes.decode()
+            editor = (root / "editor").read_text() if (root / "editor").exists() else ""
+            notifications = []
+            try:
+                while True:
+                    payload = receiver.recv(1024 * 1024)
+                    notifications.append(hashlib.sha256(payload).hexdigest() if real else payload.decode())
+            except socket.timeout:
+                pass
+            finally:
+                receiver.close()
+            return builds, first, final, editor, notifications
+
+    def test_first_success_builds_once_and_reuses_watcher(self):
+        builds, first, final, _, notifications = self.run_session(recover=True)
+        self.assertEqual(builds, ["watch"])
+        self.assertEqual((first, final), ("PDF-good", "PDF-recovered"))
+        self.assertEqual(notifications, ["PDF-recovered"])
+
+    def test_first_error_opens_diagnostics_then_recovers(self):
+        builds, first, final, editor, notifications = self.run_session(initial="error", recover=True)
+        self.assertEqual(builds, ["watch"])
+        self.assertEqual((first, final), ("PDF-error", "PDF-recovered"))
+        self.assertIn(".source.error.log", editor)
+        self.assertEqual(notifications, ["PDF-recovered"])
+
+    def test_first_error_keeps_last_good(self):
+        builds, first, final, editor, _ = self.run_session(initial="error", keep=True)
+        self.assertEqual(builds, ["watch"])
+        self.assertEqual((first, final), ("PDF-last-good", "PDF-last-good"))
+        self.assertIn(".source.error.log", editor)
+
+    def test_native_watch_failure_falls_back_to_one_shot(self):
+        builds, first, final, _, _ = self.run_session(fallback=True)
+        self.assertEqual(builds, ["watch", "compile"])
+        self.assertEqual((first, final), ("PDF-good", "PDF-good"))
+
+    def test_disabled_native_watch_keeps_one_shot_startup(self):
+        builds, first, final, _, _ = self.run_session(disabled=True)
+        self.assertEqual(builds, ["compile"])
+        self.assertEqual((first, final), ("PDF-good", "PDF-good"))
+
+    def test_standalone_native_watch_preserves_initial_build_option(self):
+        for option in ("", "--no-initial"):
+            with self.subTest(option=option):
+                builds, first, final, _, _ = self.run_session(watcher=option)
+                self.assertEqual(builds, ["compile", "watch"] if not option else ["watch"])
+                self.assertEqual((first, final), ("PDF-good", "PDF-good"))
+
+    def test_failed_viewer_launch_stops_the_early_watcher(self):
+        builds, first, final, editor, _ = self.run_session(abort=True)
+        self.assertEqual(builds, ["watch"])
+        self.assertEqual((first, final, editor), ("", "PDF-good", ""))
+
+    def test_interrupt_during_first_build_stops_the_early_watcher(self):
+        builds, first, final, editor, _ = self.run_session(interrupt=True)
+        self.assertEqual(builds, ["watch"])
+        self.assertEqual((first, final, editor), ("", "", ""))
+
+    def test_replaced_source_state_cannot_redirect_watcher_notifications(self):
+        builds, _, final, _, notifications = self.run_session(recover=True, replace_state=True)
+        self.assertEqual(builds, ["watch"])
+        self.assertEqual(final, "PDF-recovered")
+        self.assertEqual(notifications, ["PDF-recovered"])
+
+    def test_standalone_default_retains_pdf_if_native_watch_exits_early(self):
+        builds, first, final, _, _ = self.run_session(watcher="", fallback=True)
+        self.assertEqual(builds[0], "compile")
+        self.assertEqual((first, final), ("PDF-good", "PDF-good"))
+
+    @unittest.skipUnless(shutil.which("typst"), "real Typst is required")
+    def test_real_typst_first_build_and_edit_share_one_process(self):
+        builds, first, final, _, notifications = self.run_session(recover=True, real=True)
+        self.assertEqual(builds, ["watch"])
+        self.assertNotEqual(first, final)
+        self.assertEqual(notifications, [final])
 
 
 class TypstForwardCacheTests(unittest.TestCase):

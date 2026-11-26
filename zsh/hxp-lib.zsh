@@ -312,9 +312,19 @@ _hxp_watch_match() {
 }
 
 _hxp_reload_viewer() {
-  [[ "${HXP_VIEWER_KIND:-}" == fancy-cat && -S "${HXP_VIEWER_SOCKET:-}" ]] || return 0
+  local viewer="${HXP_VIEWER_KIND:-}" socket="${HXP_VIEWER_SOCKET:-}" line
+  # Native Typst starts before the preview exists; each watcher owns its route.
+  if [[ -n "${HXP_VIEWER_ROUTE:-}" && -r "$HXP_VIEWER_ROUTE" ]]; then
+    while IFS= read -r line; do
+      case "$line" in
+        viewer=*) viewer="${line#viewer=}" ;;
+        viewer_socket=*) socket="${line#viewer_socket=}" ;;
+      esac
+    done < "$HXP_VIEWER_ROUTE"
+  fi
+  [[ "$viewer" == fancy-cat && -S "$socket" ]] || return 0
   # Polling is the fallback.
-  fancy-cat --remote "$HXP_VIEWER_SOCKET" reload >/dev/null 2>&1 || true
+  fancy-cat --remote "$socket" reload >/dev/null 2>&1 || true
 }
 
 _hxp_extract_line() {
@@ -867,6 +877,13 @@ _hxp_sweep_artifacts() {
   return 0
 }
 
+# Signal the first native result only after publication or error-report generation.
+_hxp_typst_startup_result() {
+  [[ -n "${HXP_STARTUP_RESULT:-}" && ! -e "$HXP_STARTUP_RESULT" ]] || return 0
+  print -r -- "$1" >| "$HXP_STARTUP_RESULT.tmp" &&
+    _hxp_mv "$HXP_STARTUP_RESULT.tmp" "$HXP_STARTUP_RESULT"
+}
+
 _hxp_typst_render_state() {
   emulate -L zsh
   local state="$1" buf="$2" src="$3" ext="$4" err_log="$5" err_md="$6" temp_pdf="$7" debug_tex="$8" pdf="$9"
@@ -880,6 +897,7 @@ _hxp_typst_render_state() {
     _hxp_forget_error_pdf "$pdf"
     zf_rm -f -- "$err_md"
     _hxp_reload_viewer
+    _hxp_typst_startup_result 0
     return 0
   fi
   print -rn -- "$buf" >> "$err_log"
@@ -889,6 +907,7 @@ _hxp_typst_render_state() {
     fi
   fi
   zf_rm -f -- "$temp_pdf"
+  _hxp_typst_startup_result 1
   return 0
 }
 
